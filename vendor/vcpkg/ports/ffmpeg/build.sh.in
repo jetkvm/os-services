@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Configures, builds and installs FFmpeg in the build folder. portfile.cmake
+# fills in the values between @ signs. On Windows, msys bash takes the
+# folders in their C:/ form.
+
+set -e
+
+jobs=@VCPKG_CONCURRENCY@
+: "${jobs:=$(nproc)}"
+
+cd "@BUILD_DIR@"
+sh "@SOURCE_PATH@/configure" "--prefix=@INST_PREFIX@" @CONFIGURE_OPTIONS@
+make -j"${jobs}" V=1
+make install

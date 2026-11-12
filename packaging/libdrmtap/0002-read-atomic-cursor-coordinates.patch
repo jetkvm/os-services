@@ -1,0 +1,17 @@
+diff --git a/helper/drmtap-helper.c b/helper/drmtap-helper.c
+--- a/helper/drmtap-helper.c
++++ b/helper/drmtap-helper.c
+@@ -1011,6 +1011,13 @@ int main(int argc, char **argv) {
+         fprintf(stderr, "drmtap-helper: dropped implicit DRM master on %s\n", device);
+     }
+     drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
++    /* CRTC_X/Y are atomic properties. Without this client capability the
++     * property queries silently return zero and every cursor stays at (0,0).
++     * Opting into the properties does not acquire DRM master or modeset. */
++    drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1);
++    /* Atomic clients on virtual GPUs also opt into cursor hotspot handling
++     * to keep those cursor planes visible (DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT). */
++    drmSetClientCap(drm_fd, 6, 1);
+ 
+     /* Detect virtio_gpu once */
+     int is_virtio = 0;

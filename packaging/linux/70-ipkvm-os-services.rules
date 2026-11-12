@@ -1,0 +1,12 @@
+# Lets the user of the active local session open any KVM that offers IP-KVM
+# OS Services, whatever USB vendor and product ID the KVM presents.
+#
+# The match is on the OS Services interface: class ff, subclass 4a, protocol
+# 01 (see PROTOCOL.md). udev's usb_id lists every interface of a USB device in
+# ID_USB_INTERFACES, as ":ccsspp:ccsspp:" in lowercase hex. The tag goes on
+# the device, not the interface, because the sender opens the whole device.
+# 50-udev-default.rules imports usb_id for every USB device; the first line
+# imports it in case that has not happened. This file sorts before
+# 71-seat.rules and 73-seat-late.rules, which turn the tag into access.
+ACTION!="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="", IMPORT{builtin}="usb_id"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="*:ff4a01:*", TAG+="uaccess"

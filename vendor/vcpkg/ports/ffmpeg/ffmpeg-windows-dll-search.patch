@@ -1,0 +1,14 @@
+--- a/compat/w32dlfcn.h
++++ b/compat/w32dlfcn.h
+@@ -131,7 +131,10 @@
+         return NULL;
+     module = LoadPackagedLibrary(name_w, 0);
+ #else
+-#define LOAD_FLAGS (LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)
++/* Only System32: the encoder runtimes (AMF, NVENC, Quick Sync) are
++ * installed there, and a DLL placed next to the executable must not load
++ * into the process. */
++#define LOAD_FLAGS LOAD_LIBRARY_SEARCH_SYSTEM32
+     /* filename may be be in CP_ACP */
+     if (!name_w)
+         return LoadLibraryExA(name, NULL, LOAD_FLAGS);

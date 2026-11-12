@@ -1,0 +1,9 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=+crt-static"]
+
+# The sender captures through ScreenCaptureKit, which needs macOS 12.3.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "12.3"

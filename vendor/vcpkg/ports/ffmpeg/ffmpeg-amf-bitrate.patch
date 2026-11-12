@@ -1,0 +1,47 @@
+--- a/libavcodec/amfenc.c
++++ b/libavcodec/amfenc.c
+@@ -389,6 +389,36 @@
+     return res;
+ }
+ 
++/*
++ * Gives the running encoder the bit_rate of the codec context when the
++ * caller changed it after init. AMF's rate control takes the new target
++ * from the next frame on, with no reset and no IDR.
++ */
++static void amf_follow_bit_rate(AVCodecContext *avctx)
++{
++    AMFEncoderContext *ctx = avctx->priv_data;
++    const wchar_t     *target;
++    AMFVariantStruct   current;
++    AMF_RESULT         res;
++
++    if (avctx->bit_rate <= 0)
++        return;
++    switch (avctx->codec->id) {
++    case AV_CODEC_ID_H264: target = AMF_VIDEO_ENCODER_TARGET_BITRATE;      break;
++    case AV_CODEC_ID_HEVC: target = AMF_VIDEO_ENCODER_HEVC_TARGET_BITRATE; break;
++    case AV_CODEC_ID_AV1:  target = AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE;  break;
++    default:               return;
++    }
++    AMFVariantInit(&current);
++    res = ctx->encoder->pVtbl->GetProperty(ctx->encoder, target, &current);
++    if (res == AMF_OK && current.type == AMF_VARIANT_INT64 && current.int64Value == avctx->bit_rate)
++        return;
++    AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, target, avctx->bit_rate);
++    if (res != AMF_OK)
++        av_log(avctx, AV_LOG_WARNING, "Cannot change the target bit rate to %"PRId64": %d\n",
++               avctx->bit_rate, res);
++}
++
+ static int amf_submit_frame(AVCodecContext *avctx, AVFrame    *frame, AMFSurface **surface_resubmit)
+ {
+     AMFEncoderContext      *ctx = avctx->priv_data;
+@@ -526,6 +556,7 @@
+     default:
+         break;
+     }
++    amf_follow_bit_rate(avctx);
+     // submit surface
+     res = ctx->encoder->pVtbl->SubmitInput(ctx->encoder, (AMFData*)surface);
+     if (res == AMF_INPUT_FULL) { // handle full queue

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "IP-KVM OS Services",
+  "identifier": "com.jetkvm.os-services",
+  "bundle": {
+    "active": true,
+    "publisher": "JetKVM",
+    "resources": {
+      "target/notices/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "icon": [
+      "packaging/icons/icon.ico",
+      "packaging/icons/icon.png"
+    ]
+  }
+}

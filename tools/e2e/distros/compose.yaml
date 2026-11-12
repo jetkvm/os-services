@@ -1,0 +1,118 @@
+# Linux distributions as computers under test for tools/e2e, on the computer
+# that has the KVM plugged in: each container runs systemd, the user
+# "tester", and sshd on 127.0.0.1, with the host's GPU, USB and input
+# devices, so the KVM reaches it by cable. Its desktop runs on the host's
+# display while tools/e2e tests it (e2e-desktop.service).
+#
+#   go run ./e2e -lab-key                        # once: create the lab key
+#   docker compose -f e2e/distros/compose.yaml up -d --build [name...]
+#   docker compose -f e2e/distros/compose.yaml down
+#
+# sshd trusts only the lab key. Run one OS Services at a time: tools/e2e
+# stops the service after each target.
+name: os-services-e2e
+
+x-computer: &computer
+  privileged: true
+  cgroup: host
+  restart: unless-stopped
+  tmpfs: [/run, /run/lock]
+
+x-lab-key: &lab-key
+  type: bind
+  source: ${XDG_STATE_HOME:-${HOME}/.local/state}/os-services-e2e/lab-key
+  target: /etc/ssh/lab-key
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-devices: &devices
+  type: bind
+  source: /dev/bus/usb
+  target: /dev/bus/usb
+
+x-input: &input
+  type: bind
+  source: /dev/input
+  target: /dev/input
+
+x-cgroups: &cgroups
+  type: bind
+  source: /sys/fs/cgroup
+  target: /sys/fs/cgroup
+
+services:
+  ubuntu:
+    <<: *computer
+    build: { context: ., dockerfile: ubuntu.Dockerfile }
+    hostname: e2e-ubuntu
+    ports: ["127.0.0.1:2201:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, ubuntu-host-key:/etc/ssh/host-key]
+  ubuntu-22:
+    <<: *computer
+    build: { context: ., dockerfile: ubuntu-22.Dockerfile }
+    hostname: e2e-ubuntu-22
+    ports: ["127.0.0.1:2208:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, ubuntu-22-host-key:/etc/ssh/host-key]
+  debian:
+    <<: *computer
+    build: { context: ., dockerfile: debian.Dockerfile }
+    hostname: e2e-debian
+    ports: ["127.0.0.1:2202:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, debian-host-key:/etc/ssh/host-key]
+  fedora:
+    <<: *computer
+    build: { context: ., dockerfile: fedora.Dockerfile }
+    hostname: e2e-fedora
+    ports: ["127.0.0.1:2203:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, fedora-host-key:/etc/ssh/host-key]
+  arch:
+    <<: *computer
+    build: { context: ., dockerfile: arch.Dockerfile }
+    hostname: e2e-arch
+    ports: ["127.0.0.1:2204:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, arch-host-key:/etc/ssh/host-key]
+  ubuntu-xfce:
+    <<: *computer
+    build: { context: ., dockerfile: ubuntu-xfce.Dockerfile }
+    hostname: e2e-ubuntu-xfce
+    ports: ["127.0.0.1:2205:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, ubuntu-xfce-host-key:/etc/ssh/host-key]
+  debian-xfce:
+    <<: *computer
+    build: { context: ., dockerfile: debian-xfce.Dockerfile }
+    hostname: e2e-debian-xfce
+    ports: ["127.0.0.1:2207:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, debian-xfce-host-key:/etc/ssh/host-key]
+  arch-kde:
+    <<: *computer
+    build: { context: ., dockerfile: arch-kde.Dockerfile }
+    hostname: e2e-arch-kde
+    ports: ["127.0.0.1:2206:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, arch-kde-host-key:/etc/ssh/host-key]
+  arch-sway:
+    <<: *computer
+    build: { context: ., dockerfile: arch-sway.Dockerfile }
+    hostname: e2e-arch-sway
+    ports: ["127.0.0.1:2209:22"]
+    volumes: [*lab-key, *devices, *input, *cgroups, arch-sway-host-key:/etc/ssh/host-key]
+  # No systemd: Docker's init is the first process, and e2e-init runs sshd.
+  devuan:
+    <<: *computer
+    init: true
+    build: { context: ., dockerfile: devuan.Dockerfile }
+    hostname: e2e-devuan
+    ports: ["127.0.0.1:2211:22"]
+    volumes: [*lab-key, *devices, *input, devuan-host-key:/etc/ssh/host-key]
+
+volumes:
+  ubuntu-host-key:
+  ubuntu-22-host-key:
+  debian-host-key:
+  fedora-host-key:
+  arch-host-key:
+  ubuntu-xfce-host-key:
+  debian-xfce-host-key:
+  arch-kde-host-key:
+  arch-sway-host-key:
+  devuan-host-key:

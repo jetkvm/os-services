@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+# Publishes a release from the CI builds of a version tag: checks the
+# artifacts, signs the packages that the KVM installs and the release index
+# that lists them, builds the installer ISO that the KVM mounts, uploads them
+# to R2, creates the GitHub release, and opens a pull request that moves
+# Cargo.toml to the next version: the next patch version unless the release
+# asks for another one.
+#
+# With --dev it publishes a dev release, as the firmware's `make dev_release`
+# does: the version is the one in Cargo.toml with a UTC time stamp, which CI
+# builds into the service from the tag. Nothing is signed; the release goes
+# into the unsigned dev index, which only KVMs on the dev channel read, and
+# Cargo.toml keeps its version.
+set -Eeuo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKFLOW="build.yml"
+R2_REMOTE="${R2_REMOTE:-r2}"
+R2_BUCKET="${R2_BUCKET:-os-services-update}"
+# The KVM reads the index and the packages here (osServicesBucketURL in
+# the firmware's guest_update_release.go).
+PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-https://os-services.jetkvm.com}"
+# The installer ISO of the newest stable release, at a fixed name in the
+# bucket (OS_SERVICES_INSTALLER_URL in the KVM's useOsServicesInstaller.ts).
+INSTALLER_ISO="jetkvm-os-services.iso"
+# The JetKVM release key that the firmware trusts (rootKeyFingerprint in
+# the firmware's internal/ota/gpg.go). The signing key is one of its subkeys.
+RELEASE_KEY_FPR="AF5A36A993D828FEFE7C18C2D1B9856C26A79E95"
+DRY_RUN=false
+DEV=false
+ASSUME_YES=false
+TAG=""
+NEXT_VERSION=""
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/release [options] vX.Y.Z
+       scripts/release --dev [options] [vX.Y.Z-devYYYYMMDDHHMM]
+
+Options:
+  --dev                  Publish an unsigned dev release of the Cargo.toml
+                         version, for KVMs on the dev channel
+  --dry-run              Stop before uploading to R2 and GitHub
+  --yes                  Answer yes to every confirmation
+  --signing-key FPR      Fingerprint of the release signing subkey
+  --next-version X.Y.Z   Version that Cargo.toml moves to after the release;
+                         without it the release asks, and --yes takes the
+                         next patch version
+  -h, --help             Show this help
+
+The signing key may also come from SIGNING_KEY_FPR. The upload uses the
+rclone remote R2_REMOTE (default r2) and the bucket R2_BUCKET.
+
+Needs cargo, curl, gh, git, gpg, jq, rclone, readelf and xorriso.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --dev) DEV=true; shift ;;
+    --yes) ASSUME_YES=true; shift ;;
+    --signing-key) SIGNING_KEY_FPR="$2"; shift 2 ;;
+    --next-version) NEXT_VERSION="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    *) [[ -z "$TAG" ]] || { echo "Give one version tag" >&2; exit 2; }; TAG="$1"; shift ;;
+  esac
+done
+
+title() { printf '\n== %s ==\n' "$1"; }
+fail() { printf 'Error: %s\n' "$1" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
+
+confirm() {
+  $ASSUME_YES && return 0
+  local answer
+  read -r -p "$1 [y/N] " answer
+  [[ "$answer" == y || "$answer" == Y ]]
+}
+
+# Quotes typed around an answer are not part of it: the answer is not
+# parsed by a shell.
+ask() {
+  local answer
+  read -r -p "$1${2:+ [$2]}: " answer
+  answer="${answer:-${2:-}}"
+  case "$answer" in
+    \'*\' | \"*\") answer="${answer:1:${#answer}-2}" ;;
+  esac
+  printf '%s\n' "$answer"
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# Checks every file a SHA256SUMS lists against its hash.
+verify_checksums() {
+  local sums="$1" dir expected name
+  dir="$(dirname "$sums")"
+  while read -r expected name; do
+    name="${name#\*}"
+    [[ -f "$dir/$name" ]] || fail "Missing artifact listed by $sums: $name"
+    [[ "$(sha256_file "$dir/$name")" == "$expected" ]] || fail "Checksum mismatch: $name"
+  done < "$sums"
+}
+
+find_one() {
+  local matches
+  mapfile -t matches < <(find "$ARTIFACTS" -type f -name "$1")
+  [[ "${#matches[@]}" == 1 ]] || fail "Expected one $1 artifact, found ${#matches[@]}"
+  printf '%s\n' "${matches[0]}"
+}
+
+# Copies one artifact into the release under a name that carries the version
+# and the platform.
+stage_asset() {
+  cp "$(find_one "$1")" "$ASSETS/IP-KVM-OS-Services_${VERSION}_$2"
+}
+
+# Fails unless a detached signature of a file verifies against a key of the
+# JetKVM release key, the key the firmware trusts.
+verify_release_signature() {
+  local signature="$1" file="$2"
+  gpg --status-fd 1 --verify "$signature" "$file" 2>/dev/null \
+    | awk -v key="$RELEASE_KEY_FPR" '$2 == "VALIDSIG" && $12 == key { found = 1 } END { exit !found }' \
+    || fail "$(basename "$file") is not signed with the JetKVM release key"
+}
+
+# Signs a file with the release signing subkey, as the firmware release does:
+# it asks before each attempt, because the subkey is on a YubiKey that needs
+# a touch or a PIN, and it tries up to three times.
+sign_file() {
+  local attempt
+  for attempt in 1 2 3; do
+    confirm "Ready to sign $(basename "$1") with key $SIGNING_KEY_FPR?" || fail "Signing cancelled"
+    if gpg --yes --detach-sign --local-user "$SIGNING_KEY_FPR" --output "$1.sig" "$1"; then
+      verify_release_signature "$1.sig" "$1"
+      return
+    fi
+    rm -f "$1.sig"
+    echo "GPG signing failed (attempt $attempt/3). Please retry." >&2
+  done
+  fail "GPG signing of $(basename "$1") failed after 3 attempts"
+}
+
+# Puts the release signature and the release key into the AppImage. The
+# service on Linux installs an update only if the package carries a
+# signature from the release key of the installed AppImage. It asks and
+# retries as sign_file does.
+sign_appimage() {
+  local attempt
+  for attempt in 1 2 3; do
+    confirm "Ready to sign inside $(basename "$1") with key $SIGNING_KEY_FPR?" || fail "Signing cancelled"
+    "$ROOT/scripts/sign-appimage" "$1" "$SIGNING_KEY_FPR" "$RELEASE_KEY_FPR" && return
+    echo "Signing inside the AppImage failed (attempt $attempt/3). Please retry." >&2
+  done
+  fail "Signing inside $(basename "$1") failed after 3 attempts"
+}
+
+# Prints the index entry of a package that the KVM installs. The key is the
+# package name the sender advertises; the path is relative to the index.
+index_package() {
+  local package="$1" name="IP-KVM-OS-Services_${VERSION}_$2"
+  jq -n --arg package "$package" --arg path "$VERSION/$name" \
+    --argjson size "$(wc -c < "$ASSETS/$name" | tr -d ' ')" --arg sha256 "$(sha256_file "$ASSETS/$name")" \
+    '{($package): {path: $path, size: $size, sha256: $sha256}}'
+}
+
+# Downloads a published file and fails unless it matches the local copy.
+check_published() {
+  curl --fail --silent --show-error --location --retry 5 "$PUBLIC_BASE_URL/$1" --output "$WORK/published"
+  cmp -s "$WORK/published" "$2" || fail "The published $1 differs from $2"
+}
+
+next_patch() {
+  local major minor patch
+  IFS=. read -r major minor patch <<< "${1%%[+-]*}"
+  printf '%s.%s.%s\n' "$major" "$minor" "$((patch + 1))"
+}
+
+next_minor() {
+  local major minor
+  IFS=. read -r major minor _ <<< "${1%%[+-]*}"
+  printf '%s.%s.0\n' "$major" "$((minor + 1))"
+}
+
+# True when $1 is a version X.Y.Z above $2.
+version_above() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$1" != "$2" &&
+    "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" == "$1" ]]
+}
+
+CARGO_VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
+if $DEV; then
+  # A dry run names the tag of an earlier run; a new dev release gets a new
+  # time stamp.
+  [[ -n "$TAG" ]] || TAG="v$CARGO_VERSION-dev$(date -u +%Y%m%d%H%M)"
+  [[ "$TAG" == "v$CARGO_VERSION-dev"* && "${TAG##*-dev}" =~ ^[0-9]{12}$ ]] \
+    || fail "A dev tag must look like v$CARGO_VERSION-devYYYYMMDDHHMM"
+else
+  [[ -n "$TAG" ]] || { usage; exit 2; }
+  [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "The tag must look like v1.2.3; publish a prerelease with --dev"
+  [[ "$CARGO_VERSION" == "${TAG#v}" ]] || fail "Cargo.toml version does not match $TAG"
+fi
+if [[ -n "$NEXT_VERSION" ]]; then
+  $DEV && fail "--next-version applies to a stable release; a dev release keeps Cargo.toml"
+  version_above "$NEXT_VERSION" "${TAG#v}" || fail "--next-version must be a version X.Y.Z above ${TAG#v}"
+fi
+VERSION="${TAG#v}"
+commands=(cargo curl gh git jq rclone xorriso)
+$DEV || commands+=(gpg readelf)
+for command in "${commands[@]}"; do need "$command"; done
+if ! $DEV; then
+  [[ -n "${SIGNING_KEY_FPR:-}" ]] || fail "Set --signing-key or SIGNING_KEY_FPR"
+  gpg --list-secret-keys "$SIGNING_KEY_FPR" >/dev/null 2>&1 \
+    || fail "Signing key $SIGNING_KEY_FPR is not in the local GPG keyring"
+fi
+R2="$R2_REMOTE:$R2_BUCKET"
+rclone lsf "$R2_REMOTE:$R2_BUCKET/" >/dev/null 2>&1 \
+  || fail "Cannot reach the R2 bucket $R2_BUCKET; check the rclone remote $R2_REMOTE"
+[[ -z "$(rclone lsf "$R2/$VERSION/" 2>/dev/null)" ]] || fail "Version $VERSION already exists in R2"
+cd "$ROOT"
+
+title "IP-KVM OS Services $TAG"
+$DEV && echo "Dev release: unsigned, for KVMs on the dev channel."
+[[ -z "$(git status --porcelain)" ]] || fail "The worktree must be clean"
+
+COMMIT="$(git rev-parse HEAD)"
+if git show-ref --verify --quiet "refs/tags/$TAG"; then
+  [[ "$(git rev-list -n 1 "$TAG")" == "$COMMIT" ]] || fail "$TAG points to another commit"
+else
+  $DRY_RUN && fail "$TAG must exist for a dry run"
+  confirm "Create annotated tag $TAG at $(git rev-parse --short HEAD)?" || fail "Release cancelled"
+  git tag -a "$TAG" -m "IP-KVM OS Services $TAG"
+fi
+# An annotated tag lists its commit under ^{}; a lightweight tag lists it
+# under the tag name.
+REMOTE_COMMIT="$(git ls-remote origin "refs/tags/$TAG^{}" | awk 'NR == 1 { print $1 }')"
+[[ -n "$REMOTE_COMMIT" ]] || REMOTE_COMMIT="$(git ls-remote origin "refs/tags/$TAG" | awk 'NR == 1 { print $1 }')"
+if [[ -z "$REMOTE_COMMIT" ]]; then
+  $DRY_RUN && fail "$TAG must be pushed for a dry run"
+  confirm "Push $TAG to start the CI builds?" || fail "Release cancelled"
+  git push origin "$TAG"
+elif [[ "$REMOTE_COMMIT" != "$COMMIT" ]]; then
+  fail "The remote $TAG points to another commit"
+fi
+
+title "CI builds"
+echo "Waiting for the Windows, Linux and macOS (arm64) builds of $TAG."
+RUN_ID=""
+for _ in {1..30}; do
+  RUN_ID="$(gh run list --workflow "$WORKFLOW" --commit "$COMMIT" --event push --limit 20 \
+    --json databaseId,headBranch --jq ".[] | select(.headBranch == \"$TAG\") | .databaseId" | head -1)"
+  [[ -n "$RUN_ID" ]] && break
+  sleep 5
+done
+[[ -n "$RUN_ID" ]] || fail "No CI build appeared for $TAG"
+gh run watch "$RUN_ID" --exit-status
+
+WORK="$ROOT/target/release-work/$TAG"
+ARTIFACTS="$WORK/artifacts"
+ASSETS="$WORK/github"
+rm -rf "$WORK"
+mkdir -p "$ARTIFACTS" "$ASSETS"
+gh run download "$RUN_ID" --dir "$ARTIFACTS" --name windows-x86_64 --name linux-x86_64 --name macos-arm64
+
+title "Artifact checksums"
+mapfile -t sums < <(find "$ARTIFACTS" -name SHA256SUMS -type f)
+[[ "${#sums[@]}" == 3 ]] || fail "Expected checksums from three builds, found ${#sums[@]}"
+for file in "${sums[@]}"; do verify_checksums "$file"; done
+
+title "Release assets"
+stage_asset '*.exe' windows-x86_64-setup.exe
+stage_asset '*.dmg' macos-aarch64.dmg
+stage_asset '*arm64*.app.tar.gz' macos-aarch64.app.tar.gz
+stage_asset '*.AppImage' linux-x86_64.AppImage
+# The AppImage of a release carries its signature in itself; a dev release
+# has none. The signature goes in before the hashes and the detached
+# signature of the file are made.
+$DEV || sign_appimage "$ASSETS/IP-KVM-OS-Services_${VERSION}_linux-x86_64.AppImage"
+# The KVM installs these packages; the DMG is installed by hand. The KVM
+# checks the signature of each package of a release, as it does for the
+# firmware; a dev release has none.
+KVM_PACKAGES=(windows-x86_64-setup.exe macos-aarch64.app.tar.gz linux-x86_64.AppImage)
+if ! $DEV; then
+  for suffix in "${KVM_PACKAGES[@]}"; do sign_file "$ASSETS/IP-KVM-OS-Services_${VERSION}_$suffix"; done
+fi
+# The Linux installer for a person: the AppImage, executable, alone in a
+# .tar.gz. A browser download or a copy from the disc loses the execute
+# permission; the archive keeps it, so the AppImage runs after "Extract
+# Here". The KVM installs the bare AppImage.
+APPIMAGE_NAME="IP-KVM-OS-Services_${VERSION}_linux-x86_64.AppImage"
+mkdir -p "$WORK/linux-archive"
+cp "$ASSETS/$APPIMAGE_NAME" "$WORK/linux-archive/"
+chmod 0755 "$WORK/linux-archive/$APPIMAGE_NAME"
+tar -czf "$ASSETS/IP-KVM-OS-Services_${VERSION}_linux-x86_64.tar.gz" -C "$WORK/linux-archive" "$APPIMAGE_NAME"
+
+title "Installer ISO"
+# A KVM mounts this ISO on a computer without OS Services, so its user can
+# install the service from it.
+ISO_NAME="IP-KVM-OS-Services_${VERSION}.iso"
+"$ROOT/scripts/installer-iso" "$VERSION" "$ASSETS" "$ASSETS/$ISO_NAME"
+# The list of assets is read before SHA256SUMS exists, so the file does not
+# list itself and `sha256sum --check` accepts it.
+(cd "$ASSETS" && assets=(*) \
+  && for asset in "${assets[@]}"; do printf '%s  %s\n' "$(sha256_file "$asset")" "$asset"; done > SHA256SUMS)
+
+title "Release index"
+# The KVM checks each package against the size and SHA-256 the index lists.
+# It trusts the release index only with a signature from the release key,
+# and the existing index must carry that signature too, or this release
+# would sign whatever the bucket holds. The dev index carries no signature.
+if $DEV; then INDEX_NAME="releases-dev.json"; else INDEX_NAME="releases.json"; fi
+INDEX="$WORK/$INDEX_NAME"
+CURRENT="$WORK/current.json"
+HAD_INDEX=false
+# A listing that fails stops the release: taken as "no index yet", it would
+# make this release publish an index that lists only itself.
+listing="$(rclone lsf --files-only --include "/$INDEX_NAME" "$R2/")" \
+  || fail "Cannot list $R2/ to find $INDEX_NAME"
+if [[ -n "$listing" ]]; then
+  HAD_INDEX=true
+  rclone copyto "$R2/$INDEX_NAME" "$CURRENT"
+  if ! $DEV; then
+    rclone copyto "$R2/$INDEX_NAME.sig" "$CURRENT.sig"
+    verify_release_signature "$CURRENT.sig" "$CURRENT"
+  fi
+else
+  confirm "R2 has no $INDEX_NAME yet. Start a new one?" || fail "Release cancelled"
+  echo '{"releases": []}' > "$CURRENT"
+fi
+jq -e --arg version "$VERSION" 'all(.releases[]; .version != $version)' "$CURRENT" >/dev/null \
+  || fail "$INDEX_NAME already lists $VERSION"
+PACKAGES="$(jq -s 'add' \
+  <(index_package windows-x86_64 windows-x86_64-setup.exe) \
+  <(index_package macos-aarch64 macos-aarch64.app.tar.gz) \
+  <(index_package linux-x86_64-appimage linux-x86_64.AppImage))"
+jq --arg version "$VERSION" --argjson packages "$PACKAGES" \
+  '.releases += [{version: $version, packages: $packages}]' "$CURRENT" > "$INDEX"
+$DEV || sign_file "$INDEX"
+jq '.releases[-1]' "$INDEX"
+
+if $DRY_RUN; then
+  title "Dry run complete"
+  echo "The release assets are in $ASSETS, and the index is $INDEX."
+  exit 0
+fi
+
+title "Publish"
+confirm "Publish $TAG to R2 and GitHub?" || fail "Release cancelled"
+# The packages go up first, and the index last: a KVM that reads the new
+# index finds every package it lists.
+for suffix in "${KVM_PACKAGES[@]}"; do
+  name="IP-KVM-OS-Services_${VERSION}_$suffix"
+  rclone copyto "$ASSETS/$name" "$R2/$VERSION/$name" --immutable --progress
+  $DEV || rclone copyto "$ASSETS/$name.sig" "$R2/$VERSION/$name.sig" --immutable
+  check_published "$VERSION/$name" "$ASSETS/$name"
+done
+# The DMG and the Linux .tar.gz, which a person installs by hand and the KVM
+# does not, and the installer ISO that holds them.
+for name in "IP-KVM-OS-Services_${VERSION}_macos-aarch64.dmg" \
+  "IP-KVM-OS-Services_${VERSION}_linux-x86_64.tar.gz" "$ISO_NAME"; do
+  rclone copyto "$ASSETS/$name" "$R2/$VERSION/$name" --immutable --progress
+  check_published "$VERSION/$name" "$ASSETS/$name"
+done
+# The KVM's "Mount installer" button mounts the fixed INSTALLER_ISO, so it
+# always gets the newest stable release; a dev release does not replace it.
+# It changes before the index, and R2 keeps the previous one as
+# INSTALLER_ISO.previous, so a failure here or at the index puts it back and
+# the release can run again. The restore never stops the script, so the
+# index rollback still runs after it.
+HAD_ISO=false
+restore_installer_iso() {
+  $DEV && return 0
+  if $HAD_ISO; then
+    rclone copyto "$R2/$INSTALLER_ISO.previous" "$R2/$INSTALLER_ISO" \
+      || echo "Error: $INSTALLER_ISO was not put back; copy $R2/$INSTALLER_ISO.previous to it" >&2
+  else
+    rclone deletefile "$R2/$INSTALLER_ISO" \
+      || echo "Error: $INSTALLER_ISO was not removed; delete $R2/$INSTALLER_ISO" >&2
+  fi
+}
+publish_installer_iso() {
+  $DEV && return 0
+  rclone copyto "$ASSETS/$ISO_NAME" "$R2/$INSTALLER_ISO" && check_published "$INSTALLER_ISO" "$ASSETS/$ISO_NAME"
+}
+if ! $DEV; then
+  # A listing that fails stops the release: taken as "no previous ISO", it
+  # would make a rollback delete the stable installer.
+  listing="$(rclone lsf --files-only --include "/$INSTALLER_ISO" "$R2/")" \
+    || fail "Cannot list $R2/. Remove $R2/$VERSION/ before running the release again"
+  if [[ -n "$listing" ]]; then
+    HAD_ISO=true
+    rclone copyto "$R2/$INSTALLER_ISO" "$R2/$INSTALLER_ISO.previous" \
+      || fail "Cannot keep the previous $INSTALLER_ISO. Remove $R2/$VERSION/ before running the release again"
+  fi
+fi
+if ! (publish_installer_iso); then
+  echo "Publishing $INSTALLER_ISO failed; restoring what R2 had before." >&2
+  restore_installer_iso
+  fail "$INSTALLER_ISO was not published. Remove $R2/$VERSION/ before running the release again"
+fi
+# The index and its signature change together. A KVM rejects the index
+# while the two differ, so a failure between the uploads puts the previous
+# pair back, or removes a first index.
+publish_index() {
+  rclone copyto "$INDEX" "$R2/$INDEX_NAME" && check_published "$INDEX_NAME" "$INDEX" || return 1
+  $DEV && return 0
+  rclone copyto "$INDEX.sig" "$R2/$INDEX_NAME.sig" && check_published "$INDEX_NAME.sig" "$INDEX.sig"
+}
+if ! (publish_index); then
+  echo "Publishing $INDEX_NAME failed; restoring what R2 listed before." >&2
+  restore_installer_iso
+  if $HAD_INDEX; then
+    rclone copyto "$CURRENT" "$R2/$INDEX_NAME"
+    $DEV || rclone copyto "$CURRENT.sig" "$R2/$INDEX_NAME.sig"
+  else
+    rclone deletefile "$R2/$INDEX_NAME" || true
+    $DEV || rclone deletefile "$R2/$INDEX_NAME.sig" || true
+  fi
+  fail "$INDEX_NAME was not published. Remove $R2/$VERSION/ before running the release again"
+fi
+prerelease=()
+$DEV && prerelease=(--prerelease)
+# R2 has the release at this point and KVMs offer it, so the release cannot
+# run again: it stops at "already exists in R2". When the GitHub release
+# fails, the script prints the command that creates it by hand, goes on to
+# the next version and ends with an error. The printed command changes to
+# the repository first, because gh takes the repository from the folder it
+# runs in.
+github_release=(gh release create "$TAG" "$ASSETS"/* --verify-tag --generate-notes "${prerelease[@]}"
+  --title "IP-KVM OS Services $TAG")
+GITHUB_RELEASE=true
+if ! "${github_release[@]}"; then
+  GITHUB_RELEASE=false
+  {
+    echo "Error: The GitHub release was not created. R2 has the release, so do not run"
+    echo "the release again. Create the GitHub release with this command:"
+    printf ' cd %q &&' "$ROOT"
+    printf ' %q' "${github_release[@]}"
+    echo
+  } >&2
+  $DEV && exit 1
+fi
+
+if $DEV; then
+  title "Dev release complete"
+  echo "KVMs on the dev channel offer $VERSION. Cargo.toml keeps $CARGO_VERSION."
+  exit 0
+fi
+
+title "Next version"
+if [[ -z "$NEXT_VERSION" ]]; then
+  patch="$(next_patch "$VERSION")"
+  minor="$(next_minor "$VERSION")"
+  $ASSUME_YES && NEXT_VERSION="$patch"
+  while [[ -z "$NEXT_VERSION" ]]; do
+    answer="$(ask "Next version: 1) $patch (patch)  2) $minor (minor)  or type X.Y.Z" 1)"
+    case "$answer" in
+      1) NEXT_VERSION="$patch" ;;
+      2) NEXT_VERSION="$minor" ;;
+      *) if version_above "$answer" "$VERSION"; then
+           NEXT_VERSION="$answer"
+         else
+           echo "Give 1, 2 or a version X.Y.Z above $VERSION" >&2
+         fi ;;
+    esac
+  done
+fi
+BRANCH="release/$NEXT_VERSION"
+git switch -c "$BRANCH"
+awk -v v="$NEXT_VERSION" '!done && /^version = "/ { $0 = "version = \"" v "\""; done = 1 } { print }' \
+  Cargo.toml > Cargo.toml.next && mv Cargo.toml.next Cargo.toml
+# Only the workspace package changes in Cargo.lock.
+cargo update --workspace
+git commit -q -m "Start version $NEXT_VERSION" Cargo.toml Cargo.lock
+# The push names the branch ref, so that a tag with the same name cannot be
+# pushed in its place.
+git push origin "refs/heads/$BRANCH:refs/heads/$BRANCH"
+gh pr create --fill --base main --head "$BRANCH"
+$GITHUB_RELEASE || fail "The GitHub release is missing; create it with the command above"

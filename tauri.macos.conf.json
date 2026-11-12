@@ -1,0 +1,27 @@
+{
+  "bundle": {
+    "icon": [
+      "packaging/icons/icon-macos.png",
+      "packaging/icons/icon-macos@2x.png"
+    ],
+    "macOS": {
+      "infoPlist": "packaging/macos/Info.plist",
+      "minimumSystemVersion": "12.3",
+      "dmg": {
+        "background": "packaging/macos/dmg-background.png",
+        "windowSize": {
+          "width": 720,
+          "height": 440
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 272
+        },
+        "applicationFolderPosition": {
+          "x": 540,
+          "y": 272
+        }
+      }
+    }
+  }
+}

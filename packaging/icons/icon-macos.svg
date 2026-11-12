@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- icon.svg on the macOS icon grid: an 824-point shape centered on the
+       1024-point canvas, with the shadow that system icons carry. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e7e9ee"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="#0f172a" stroke-opacity="0.10" stroke-width="3"/>
+  <rect x="282" y="282" width="210" height="210" rx="56" fill="#1f2937"/>
+  <rect x="532" y="282" width="210" height="210" rx="56" fill="#1f2937"/>
+  <rect x="282" y="532" width="210" height="210" rx="56" fill="#1f2937"/>
+  <rect x="532" y="532" width="210" height="210" rx="56" fill="#2f80ed"/>
+</svg>

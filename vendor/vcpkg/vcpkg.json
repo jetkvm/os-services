@@ -1,0 +1,41 @@
+{
+  "$comment": "The FFmpeg that the service links: hardware H.264 and H.265 encoders only. On Linux, FFmpeg adds the KMS capture's filters and links the computer's libva. The ports directory holds the FFmpeg port that UPSTREAM.md describes.",
+  "name": "ipkvm-os-services",
+  "dependencies": [
+    {
+      "name": "mfx-dispatch",
+      "platform": "windows & !arm"
+    },
+    {
+      "name": "ffmpeg",
+      "features": [
+        {
+          "name": "amf",
+          "platform": "windows & !arm & static"
+        },
+        {
+          "name": "nvcodec",
+          "platform": "(windows & !arm & static) | (linux & x64)"
+        },
+        {
+          "name": "qsv",
+          "platform": "windows & !arm & static"
+        }
+      ]
+    }
+  ],
+  "builtin-baseline": "9eec002df1cd109f8f104cd966a763daf9751489",
+  "vcpkg-configuration": {
+    "overlay-ports": ["./ports"]
+  },
+  "overrides": [
+    {
+      "name": "ffnvcodec",
+      "version": "12.1.14.0"
+    },
+    {
+      "name": "amd-amf",
+      "version": "1.5.2"
+    }
+  ]
+}

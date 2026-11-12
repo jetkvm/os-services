@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Builds the installer ISO of a release from its staged assets: the Windows
+# setup, the macOS DMG and the Linux AppImage in a .tar.gz. A KVM mounts this
+# ISO as a CD-ROM on a computer without OS Services, so its user can install
+# the service there. A copy from the disc loses the AppImage's execute
+# permission, and the archive keeps it. Joliet keeps the long file names on
+# Windows, and Rock Ridge keeps them on macOS and Linux. README.txt tells the
+# user how to install, from packaging/installer-readme.txt.
+#
+# Usage: scripts/installer-iso VERSION ASSETS_DIR OUTPUT_ISO
+#
+# Needs xorriso.
+set -Eeuo pipefail
+
+[[ $# == 3 ]] || { echo "Usage: $0 VERSION ASSETS_DIR OUTPUT_ISO" >&2; exit 2; }
+VERSION="$1"
+ASSETS="$2"
+OUTPUT="$3"
+INSTALLERS=(windows-x86_64-setup.exe macos-aarch64.dmg linux-x86_64.tar.gz)
+README="$(dirname "${BASH_SOURCE[0]}")/../packaging/installer-readme.txt"
+
+command -v xorriso >/dev/null 2>&1 || { echo "Error: Missing required command: xorriso" >&2; exit 1; }
+
+ROOT="$(mktemp -d)"
+trap 'rm -rf "$ROOT"' EXIT
+for suffix in "${INSTALLERS[@]}"; do
+  name="IP-KVM-OS-Services_${VERSION}_$suffix"
+  [[ -f "$ASSETS/$name" ]] || { echo "Error: Missing installer $ASSETS/$name" >&2; exit 1; }
+  cp "$ASSETS/$name" "$ROOT/$name"
+done
+readme="$(<"$README")"
+printf '%s\n' "${readme//@VERSION@/$VERSION}" > "$ROOT/README.txt"
+
+# The volume name is what Windows and macOS show for the mounted disc.
+xorriso -as mkisofs -quiet -volid OS_SERVICES -joliet -joliet-long -rational-rock \
+  -output "$OUTPUT" "$ROOT"

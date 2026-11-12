@@ -1,0 +1,22 @@
+--- a/libavutil/hwcontext_vaapi.c
++++ b/libavutil/hwcontext_vaapi.c
+@@ -170,6 +170,9 @@
+ #ifdef VA_FOURCC_X2R10G10B10
+     MAP(X2R10G10B10, RGB32_10, X2RGB10, 0),
+ #endif
++#ifdef VA_FOURCC_X2B10G10R10
++    MAP(X2B10G10R10, RGB32_10, X2BGR10, 0),
++#endif
+ #ifdef VA_FOURCC_Y410
+     // libva doesn't include a fourcc for XV30 and the driver only declares
+     // support for Y410, so we must fudge the mapping here.
+@@ -1073,6 +1076,9 @@
+ #if defined(VA_FOURCC_X2R10G10B10) && defined(DRM_FORMAT_XRGB2101010)
+     DRM_MAP(X2R10G10B10, 1, DRM_FORMAT_XRGB2101010),
+ #endif
++#if defined(VA_FOURCC_X2B10G10R10) && defined(DRM_FORMAT_XBGR2101010)
++    DRM_MAP(X2B10G10R10, 1, DRM_FORMAT_XBGR2101010),
++#endif
+ };
+ #undef DRM_MAP
+ 

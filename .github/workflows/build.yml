@@ -1,0 +1,212 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Lint, unit tests and the AppImage, in the Linux build container.
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      # A dev release builds the version its tag names, as the firmware's
+      # dev release does (scripts/release --dev).
+      - name: Take the dev version from the tag
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-dev')
+        run: echo "IPKVM_OS_SERVICES_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      # Only the dependency stage is cached: FFmpeg, the compiled crates and
+      # libdrmtap. It changes with the files that the Dockerfile copies into
+      # it (vendor/vcpkg, the Cargo manifests, the toolchain file, the native
+      # KMS capture and packaging/), not with the other sources. Only main
+      # writes it. A pull request build reads main's cache even after it
+      # writes its own, so its writes only push main's layers out of the
+      # repository's 10 GB.
+      - name: Build the dependency stage
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: deps
+          cache-from: type=gha,scope=linux-deps
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=linux-deps' || '' }}
+      - name: Lint, test and package
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: dist
+          outputs: type=local,dest=dist
+          cache-from: type=gha,scope=linux-deps
+          build-args: IPKVM_OS_SERVICES_VERSION=${{ env.IPKVM_OS_SERVICES_VERSION }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-x86_64
+          path: dist/*
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      VCPKG_BINARY_SOURCES: 'clear;files,C:\vcpkg-cache,readwrite'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      # vcpkg rebuilds a library when the compiler changes, so the key names
+      # the runner image too: a new image saves a new cache.
+      - id: image
+        shell: bash
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+      # Without the binary cache, vcpkg builds FFmpeg from source.
+      - id: vcpkg-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: C:\vcpkg-cache
+          key: vcpkg-windows-${{ hashFiles('vendor/vcpkg/**') }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            vcpkg-windows-${{ hashFiles('vendor/vcpkg/**') }}-
+            vcpkg-windows-
+      - name: Create the vcpkg binary cache folder
+        run: New-Item -ItemType Directory -Force C:\vcpkg-cache | Out-Null
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      # The compiled crates and Cargo's downloads.
+      # Only main saves them, and pull requests restore main's: each copy is
+      # over a gigabyte, and the repository has 10 GB of cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A dev release builds the version its tag names, as the firmware's
+      # dev release does (scripts/release --dev).
+      - name: Take the dev version from the tag
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-dev')
+        run: |
+          "IPKVM_OS_SERVICES_VERSION=$($env:GITHUB_REF_NAME.Substring(1))" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Set up
+        run: cargo xtask setup
+      # Saved right after setup, so a later failure does not lose the build.
+      - if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: C:\vcpkg-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+      - name: Set up, lint, test and package
+        run: cargo xtask ci --skip-go
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-x86_64
+          path: dist/*
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 120
+    # The Apple secrets are in the apple-signing environment, which GitHub
+    # opens only to main and to v* tags. Every other run has no environment
+    # and no Apple secret.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'apple-signing' || '' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      # A release is built from reviewed code, so a tag whose commit is not
+      # on main fails here, before a step runs the code of that commit.
+      - name: Check that the release commit is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::A release tag must point to a commit on main."
+            exit 1
+          fi
+      # vcpkg lives outside target/, which rust-cache cleans and saves.
+      - id: vcpkg-paths
+        run: |
+          mkdir -p "$RUNNER_TEMP/vcpkg-cache"
+          echo "VCPKG_ROOT=$RUNNER_TEMP/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_BINARY_SOURCES=clear;files,$RUNNER_TEMP/vcpkg-cache,readwrite" >> "$GITHUB_ENV"
+          echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
+      # Without the binary cache, vcpkg builds FFmpeg from source. vcpkg
+      # rebuilds a library when the compiler changes, so the key names the
+      # runner image too: a new image saves a new cache.
+      - id: vcpkg-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: vcpkg-macos-${{ hashFiles('vendor/vcpkg/**') }}-${{ steps.vcpkg-paths.outputs.image }}
+          restore-keys: |
+            vcpkg-macos-${{ hashFiles('vendor/vcpkg/**') }}-
+            vcpkg-macos-
+      - name: Install build tools
+        run: brew install pkg-config nasm
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      # The compiled crates and Cargo's downloads.
+      # Only main saves them, and pull requests restore main's: each copy is
+      # over a gigabyte, and the repository has 10 GB of cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Set up
+        run: cargo xtask setup
+      # Saved right after setup, so a later failure does not lose the build.
+      - if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+      # A dev release builds the version its tag names, as the firmware's
+      # dev release does (scripts/release --dev).
+      - name: Take the dev version from the tag
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-dev')
+        run: echo "IPKVM_OS_SERVICES_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      # A build of main and a release are signed with the Developer ID
+      # certificate, so macOS keeps the privacy permissions of the test
+      # computer from one such build to the next; it identifies an ad hoc
+      # build by its code hash, which each build changes. Tauri imports
+      # APPLE_CERTIFICATE into a keychain of its own and signs. Only a
+      # release is notarized, by xtask. Without the secrets Tauri would sign
+      # ad hoc, so a tag without them fails here.
+      - name: Check the Apple signing secrets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::A release needs the $name secret."
+              exit 1
+            fi
+          done
+      # Only a build of main and a release get the certificate. A pull
+      # request build and a manual run of another branch do not, because
+      # their build scripts and tests are code that is not reviewed yet; they
+      # are signed ad hoc. A signed build that is not a release is not
+      # notarized: Gatekeeper blocks it on a computer that downloads it with
+      # a browser, and scripts/release takes only the build of a tag.
+      - name: Set up, lint, test and package
+        env:
+          APPLE_CERTIFICATE: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_TEAM_ID || '' }}
+        run: cargo xtask ci --skip-go ${{ github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/v') && '--skip-notarization' || '' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: macos-arm64
+          path: dist/*

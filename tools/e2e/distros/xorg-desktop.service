@@ -1,0 +1,31 @@
+# The desktop on the host's display: an X server on :99 that drives the
+# host's GPU output, which the KVM captures. Only one container can drive
+# the output at a time, so tools/e2e starts this unit for a target and stops
+# it after; nothing starts it at boot. The Xfce images add their session to
+# it with a drop-in.
+#
+# Xorg runs without root in a logind session of tester on tty2, as a display
+# manager starts it, so logind gives it the GPU and the input devices and
+# keeps tester's access to them when udev changes a device. logind gives the
+# session the GPU only when the session starts on the console in front, so
+# the unit brings tty2 to the front first. Commands with + run outside the
+# session; otherwise each would open a session of its own on tty2.
+[Unit]
+Description=X server on the host's display, in a logind session on tty2
+After=systemd-user-sessions.service
+
+[Service]
+User=tester
+PAMName=login
+TTYPath=/dev/tty2
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+Environment=XDG_SESSION_TYPE=x11
+ExecStartPre=+/usr/bin/chvt 2
+# -noreset keeps the root window's color and pointer when the last client
+# disconnects.
+ExecStart=/usr/bin/Xorg :99 vt2 -keeptty -nolisten tcp -novtswitch -noreset -s 0 -dpms
+ExecStartPost=+/bin/sh -c 'i=0; until [ -S /tmp/.X11-unix/X99 ]; do [ $$i -lt 100 ] || exit 1; i=$$((i + 1)); sleep 0.1; done'
+# Without a desktop, the root window is black and has no pointer.
+ExecStartPost=+/usr/bin/xsetroot -display :99 -solid "#3465a4" -cursor_name left_ptr

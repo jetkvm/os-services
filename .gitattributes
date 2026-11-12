@@ -1,0 +1,8 @@
+# The Linux service embeds the udev rule byte for byte, and bash runs
+# package.sh, so a Windows checkout keeps LF endings.
+packaging/linux/** text eol=lf
+
+# The tests compare the signed test programs with their signatures byte for
+# byte, and a shell in a container runs make.sh.
+tests/fixtures/authenticode/*.exe binary
+tests/fixtures/authenticode/make.sh text eol=lf

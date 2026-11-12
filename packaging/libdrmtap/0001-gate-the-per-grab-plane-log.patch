@@ -1,0 +1,25 @@
+From: IP-KVM OS Services
+Subject: [PATCH] helper: gate the per-grab plane log behind DRMTAP_DEBUG
+
+The helper matches a plane to the CRTC on every grab, and printed a line
+each time. At the sender's capture rate that is ~120 lines a second into
+the journal for a fact that only changes on a modeset. Every other helper
+message is printed once at startup; this one was not meant to differ.
+
+diff --git a/helper/drmtap-helper.c b/helper/drmtap-helper.c
+index 2ba90fa..10cad8f 100644
+--- a/helper/drmtap-helper.c
++++ b/helper/drmtap-helper.c
+@@ -669,8 +669,10 @@ static int grab_and_send(int sock, int drm_fd, uint32_t target_crtc, int is_virt
+             if (is_primary || fb_id == 0) {
+                 fb_id = plane->fb_id;
+                 matched_crtc = plane->crtc_id;
+-                fprintf(stderr, "drmtap-helper: matched plane=%u to crtc=%u (fb=%u, %s)\n",
+-                        plane->plane_id, target_crtc, fb_id, is_primary ? "PRIMARY" : "overlay");
++                if (getenv("DRMTAP_DEBUG")) {
++                    fprintf(stderr, "drmtap-helper: matched plane=%u to crtc=%u (fb=%u, %s)\n",
++                            plane->plane_id, target_crtc, fb_id, is_primary ? "PRIMARY" : "overlay");
++                }
+                 if (is_primary) {
+                     drmModeFreePlane(plane);
+                     break;

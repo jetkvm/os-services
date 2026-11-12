@@ -1,0 +1,7 @@
+/target/
+/dist/
+*.log
+.DS_Store
+
+# Staged by `cargo xtask setup` for the Linux packages.
+/packaging/linux/drmtap/

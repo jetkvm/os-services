@@ -1,0 +1,74 @@
+--- a/libavcodec/videotoolboxenc.c
++++ b/libavcodec/videotoolboxenc.c
+@@ -290,6 +290,11 @@
+     int power_efficient;
+     int max_ref_frames;
+     int spatialaq;
++
++    /* The bit rate that the compression session runs with, and the last
++     * rate that the session refused. */
++    int64_t session_bit_rate;
++    int64_t refused_bit_rate;
+ } VTEncContext;
+ 
+ static void vtenc_free_buf_node(BufNode *info)
+@@ -1281,6 +1286,8 @@
+         }
+ 
+         CFRelease(bit_rate_num);
++        if (!status)
++            vtctx->session_bit_rate = bit_rate;
+     }
+ 
+     if (status) {
+@@ -2471,6 +2478,42 @@
+     return 0;
+ }
+ 
++/*
++ * Gives the compression session the bit_rate of the codec context when the
++ * caller changed it after the session was created, also before its first
++ * frame. The session takes the new rate from the next frame on, with no key
++ * frame.
++ */
++static void vtenc_follow_bit_rate(AVCodecContext *avctx, VTEncContext *vtctx)
++{
++    CFStringRef key;
++    CFNumberRef number;
++    SInt32      rate;
++    OSStatus    status;
++
++    if (avctx->codec_id == AV_CODEC_ID_PRORES || avctx->bit_rate <= 0 ||
++        !vtctx->session_bit_rate || vtctx->session_bit_rate == avctx->bit_rate)
++        return;
++
++    key = vtctx->constant_bit_rate ? compat_keys.kVTCompressionPropertyKey_ConstantBitRate
++                                   : kVTCompressionPropertyKey_AverageBitRate;
++    rate = (SInt32)FFMIN(avctx->bit_rate, INT32_MAX);
++    number = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &rate);
++    if (!number)
++        return;
++    status = VTSessionSetProperty(vtctx->session, key, number);
++    CFRelease(number);
++    if (!status) {
++        vtctx->session_bit_rate = avctx->bit_rate;
++        vtctx->refused_bit_rate = 0;
++    } else if (vtctx->refused_bit_rate != avctx->bit_rate) {
++        /* The next frame tries again; the warning comes once per rate. */
++        av_log(avctx, AV_LOG_WARNING, "Cannot change the bit rate to %"PRId64": %d\n",
++               avctx->bit_rate, (int)status);
++        vtctx->refused_bit_rate = avctx->bit_rate;
++    }
++}
++
+ static int vtenc_send_frame(AVCodecContext *avctx,
+                             VTEncContext   *vtctx,
+                             const AVFrame  *frame)
+@@ -2503,6 +2546,7 @@
+     }
+ #endif
+ 
++    vtenc_follow_bit_rate(avctx, vtctx);
+     time = CMTimeMake(frame->pts * avctx->time_base.num, avctx->time_base.den);
+     status = VTCompressionSessionEncodeFrame(
+         vtctx->session,

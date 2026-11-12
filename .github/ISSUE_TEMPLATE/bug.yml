@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in OS Services does not work as expected.
+labels:
+  - bug
+body:
+  - type: input
+    attributes:
+      label: OS Services version
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Operating system
+      description: The operating system of the computer that the KVM is connected to, with its version. For example, Windows 11 24H2 or Ubuntu 24.04 (Wayland).
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Graphics
+      description: The GPU and driver version.
+  - type: input
+    attributes:
+      label: KVM and firmware version
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What happened
+      description: The steps, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Service log
+      description: The log lines from the time of the problem. To find the log, see [Logs](https://github.com/jetkvm/os-services/blob/main/docs/troubleshooting.md#logs).
+      render: text

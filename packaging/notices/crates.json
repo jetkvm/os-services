@@ -1,0 +1,35 @@
+{
+  "block2": [
+    "objc2-MIT.txt"
+  ],
+  "clipboard-win": [
+    "clipboard-win-BSL-1.0.txt"
+  ],
+  "dispatch2": [
+    "objc2-MIT.txt"
+  ],
+  "objc2": [
+    "objc2-MIT.txt"
+  ],
+  "objc2-app-kit": [
+    "objc2-MIT.txt"
+  ],
+  "objc2-core-foundation": [
+    "objc2-MIT.txt"
+  ],
+  "objc2-core-graphics": [
+    "objc2-MIT.txt"
+  ],
+  "objc2-encode": [
+    "objc2-MIT.txt"
+  ],
+  "objc2-foundation": [
+    "objc2-MIT.txt"
+  ],
+  "objc2-io-surface": [
+    "objc2-MIT.txt"
+  ],
+  "openssl-sys": [
+    "openssl-Apache-2.0.txt"
+  ]
+}

@@ -1,0 +1,16 @@
+--- a/libavcodec/nvenc.c
++++ b/libavcodec/nvenc.c
+@@ -2849,10 +2849,10 @@
+             reconfig_bitrate = 1;
+         }
+ 
++        /* NVENC applies new rate control values to the running encoder.
++         * A reset would start a new GOP with an IDR that nobody asked for,
++         * and blur the frames after it while the rate control settles. */
+         if (reconfig_bitrate) {
+-            params.resetEncoder = 1;
+-            params.forceIDR = 1;
+-
+             needs_encode_config = 1;
+             needs_reconfig = 1;
+         }

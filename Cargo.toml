@@ -1,0 +1,74 @@
+[workspace]
+members = [".", "xtask"]
+default-members = ["."]
+
+# The function size limits in clippy.toml keep every function short and
+# simple; `cargo xtask lint` treats them as errors.
+[workspace.lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+
+[package]
+name = "ipkvm-os-services"
+version = "0.4.6"
+edition = "2021"
+license = "MIT"
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc = "1.4"
+
+[dependencies]
+nusb = "0.2"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+ctrlc = { version = "3", features = ["termination"] }
+dirs = "6"
+# Shells for the terminal service: openpty on macOS and Linux, ConPTY on
+# Windows.
+portable-pty = "0.9.0"
+# The KVM's identity: session.ready carries an Ed25519 signature, and the
+# user approves the key's SHA-256 fingerprint.
+ed25519-dalek = "2"
+sha2 = "0.10"
+getrandom = { version = "0.3", features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["accctrl", "aclapi", "d3d11", "d3dcommon", "dxgi", "dxgi1_2", "dxgiformat", "dxgitype", "handleapi", "libloaderapi", "processenv", "processthreadsapi", "sddl", "securitybaseapi", "softpub", "synchapi", "timeapi", "unknwnbase", "winbase", "wincrypt", "winerror", "wingdi", "wintrust", "winuser"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The update check on Linux reads the release signature inside an AppImage:
+# an OpenPGP signature in two ELF sections. Sequoia applies the OpenPGP
+# rules for key validity, expiry and revocation, and OpenSSL does the
+# cryptography. `vendored` builds OpenSSL from source and links it into the
+# program, so the AppImage needs no OpenSSL from the computer.
+[target.'cfg(target_os = "linux")'.dependencies]
+sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-openssl"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
+object = { version = "0.41", default-features = false, features = ["read_core", "elf", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"
+# The update check reads and verifies code signatures with Apple's Security
+# framework.
+core-foundation = "0.10"
+security-framework = "3"
+
+# The clipboard's concealed-content check lists the offered types, which
+# arboard does not expose. arboard uses the same crates.
+[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
+x11rb = "0.13"
+wl-clipboard-rs = "0.9"
+wayland-client = "0.31"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+

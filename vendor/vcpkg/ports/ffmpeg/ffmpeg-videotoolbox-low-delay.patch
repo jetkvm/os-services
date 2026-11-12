@@ -1,0 +1,21 @@
+--- a/libavcodec/videotoolboxenc.c
++++ b/libavcodec/videotoolboxenc.c
+@@ -2665,6 +2665,18 @@
+         }
+ 
+         vtctx->frame_ct_in++;
++        if (avctx->flags & AV_CODEC_FLAG_LOW_DELAY) {
++            // Complete this frame without ending the session. Otherwise an
++            // asynchronous encoder can leave it queued until the next input,
++            // adding latency and withholding the last frame of an idle screen.
++            status = VTCompressionSessionCompleteFrames(vtctx->session,
++                CMTimeMake(frame->pts * avctx->time_base.num, avctx->time_base.den));
++            if (status) {
++                av_log(avctx, AV_LOG_ERROR, "Error completing low-delay frame: %d\n", status);
++                status = AVERROR_EXTERNAL;
++                goto end_nopkt;
++            }
++        }
+     } else if(!vtctx->flushing) {
+         vtctx->flushing = true;
+ 

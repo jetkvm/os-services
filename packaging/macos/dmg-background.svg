@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="440" viewBox="0 0 720 440">
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbfbfc"/>
+      <stop offset="1" stop-color="#eef0f3"/>
+    </linearGradient>
+    <pattern id="dots" width="16" height="16" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#0f172a" fill-opacity="0.045"/>
+    </pattern>
+    <radialGradient id="slot" cx="0.5" cy="0.42" r="0.6">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f3f4f6"/>
+    </radialGradient>
+    <filter id="lift" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect width="720" height="440" fill="url(#page)"/>
+  <rect width="720" height="440" fill="url(#dots)"/>
+
+  <g font-family="-apple-system, 'SF Pro Display', 'Helvetica Neue', Helvetica, Arial, sans-serif">
+    <text x="360" y="70" text-anchor="middle" fill="#111827" font-size="30" font-weight="700" letter-spacing="-0.4">IP-KVM OS Services</text>
+    <text x="360" y="100" text-anchor="middle" fill="#6b7280" font-size="15">Screen, clipboard, terminal and files for your IP-KVM.</text>
+
+    <circle cx="180" cy="272" r="72" fill="url(#slot)" stroke="#e5e7eb" filter="url(#lift)"/>
+    <circle cx="540" cy="272" r="72" fill="url(#slot)" stroke="#e5e7eb" filter="url(#lift)"/>
+
+    <path d="M294 272h112" fill="none" stroke="#cbd5e1" stroke-width="3" stroke-linecap="round" stroke-dasharray="0.1 11"/>
+    <path d="M402 260l14 12-14 12" fill="none" stroke="#334155" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="356" y="304" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600" letter-spacing="1.4">DRAG TO INSTALL</text>
+
+  </g>
+</svg>
