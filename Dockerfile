@@ -68,6 +68,7 @@ RUN baseline=$(sed -n 's/.*"builtin-baseline": *"\([0-9a-f]*\)".*/\1/p' vendor/v
 COPY rust-toolchain.toml Cargo.toml Cargo.lock build.rs ./
 COPY .cargo ./.cargo
 COPY src/video/kms/native ./src/video/kms/native
+COPY vendor/nusb ./vendor/nusb
 COPY xtask/Cargo.toml ./xtask/
 COPY xtask/src/vcpkg_layout.rs ./xtask/src/
 RUN mkdir -p src xtask/src \

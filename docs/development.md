@@ -10,7 +10,7 @@ This document tells you how to build and test the service.
 | `xtask/` | The build, test and packaging commands (`cargo xtask`) |
 | `tools/` | The test tools. See [Test tools](#test-tools). |
 | `packaging/` | Installer resources, service files and the build of the Linux capture helper |
-| `vendor/` | The vcpkg manifest and the ports that build FFmpeg, with local changes |
+| `vendor/` | The vcpkg manifest and the ports that build FFmpeg, with local changes, and nusb with one change |
 
 ## Set up the build
 

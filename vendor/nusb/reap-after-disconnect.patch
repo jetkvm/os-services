@@ -1,0 +1,131 @@
+--- a/src/platform/linux_usbfs/device.rs
++++ b/src/platform/linux_usbfs/device.rs
+@@ -5,7 +5,7 @@
+     io::{Read, Seek},
+     mem::ManuallyDrop,
+     sync::{
+-        atomic::{AtomicU8, Ordering},
++        atomic::{AtomicBool, AtomicU8, Ordering},
+         Arc, Mutex, MutexGuard, Weak,
+     },
+     task::{Context, Poll},
+@@ -66,6 +66,10 @@
+     fd: OwnedFd,
+     events_id: usize,
+ 
++    /// The kernel reported the device as disconnected, and the watch on
++    /// `fd` is edge-triggered. See `handle_disconnect`.
++    disconnected: AtomicBool,
++
+     /// Read from the fd, consists of device descriptor followed by configuration descriptors
+     descriptors: Vec<u8>,
+ 
+@@ -175,6 +179,7 @@
+             LinuxDevice {
+                 fd,
+                 events_id,
++                disconnected: AtomicBool::new(false),
+                 descriptors,
+                 #[cfg(not(target_os = "android"))]
+                 sysfs,
+@@ -212,8 +217,15 @@
+         }
+     }
+ 
++    /// Reaps every URB that has completed. An edge-triggered watch reports
++    /// several completions as one event.
+     fn handle_events(&self) {
+         debug!("Handling events for device {}", self.events_id);
++        while self.reap_one() {}
++    }
++
++    /// Reaps one completed URB; false when none is left to reap now.
++    fn reap_one(&self) -> bool {
+         match usbfs::reap_urb_ndelay(&self.fd) {
+             Ok(urb) => {
+                 let transfer_data: *mut TransferData = unsafe { &(*urb) }.usercontext.cast();
+@@ -238,23 +250,59 @@
+ 
+                 // SAFETY: pointer came from submit via kernel and we're now done with it
+                 unsafe { notify_completion::<super::TransferData>(transfer_data) }
++                true
+             }
+-            Err(Errno::AGAIN) => {}
++            Err(Errno::AGAIN) => false,
+             Err(Errno::NODEV) => {
+-                debug!("Device {} disconnected", self.events_id);
+-
+-                // epoll returns events continuously on a disconnected device, and REAPURB
+-                // only returns ENODEV after all events are received, so unregister to
+-                // keep the event thread from spinning because we won't receive further events.
+-                // The drop impl will try to unregister again, but that's ok.
+-                events::unregister_fd(self.fd.as_fd());
++                self.handle_disconnect();
++                false
+             }
+             Err(e) => {
+                 error!("Unexpected error {e} from REAPURBNDELAY");
++                false
+             }
+         }
+     }
+ 
++    /// REAPURBNDELAY returned ENODEV: the device is disconnected, and no URB
++    /// has completed that is not reaped.
++    ///
++    /// URBs can still be in flight. The kernel marks the device as not
++    /// attached before it completes the device's URBs (`usb_disconnect`),
++    /// and from that mark on it answers ENODEV whenever no URB waits to be
++    /// reaped. The URBs that complete afterwards must still be reaped, or
++    /// their transfers stay pending for good and keep the device file open.
++    ///
++    /// The file of a disconnected device is always ready (EPOLLHUP), so a
++    /// level-triggered watch would make the event thread spin. The first
++    /// ENODEV therefore changes the watch to edge-triggered. The kernel
++    /// wakes the file for each URB that completes and one more time when it
++    /// removes the device, after it has completed every URB, and
++    /// `handle_events` reaps all that has completed at each wake-up. The
++    /// change itself queues one event if the file is ready, so a URB that
++    /// completes between the ENODEV and the change is reaped too.
++    fn handle_disconnect(&self) {
++        if self.disconnected.swap(true, Ordering::AcqRel) {
++            return;
++        }
++        debug!("Device {} disconnected", self.events_id);
++        let watched = events::watch_edges(
++            self.fd.as_fd(),
++            events::Tag::Device(self.events_id),
++            EventFlags::OUT,
++        );
++        if let Err(e) = watched {
++            // Without the watch nothing more is reaped, but the event
++            // thread must not spin. The drop impl will try to unregister
++            // again, but that's ok.
++            error!(
++                "Failed to watch disconnected device {}: {e}",
++                self.events_id
++            );
++            events::unregister_fd(self.fd.as_fd());
++        }
++    }
++
+     pub(crate) fn handle_timer_epoll(id: usize) {
+         let device = DEVICES.lock().unwrap().get(id).and_then(|w| w.upgrade());
+         if let Some(device) = device {
+--- a/src/platform/linux_usbfs/events.rs
++++ b/src/platform/linux_usbfs/events.rs
+@@ -79,6 +79,14 @@
+     Ok(())
+ }
+ 
++/// Changes the watch on `fd` to edge-triggered: the event thread then gets
++/// one event for each wake-up of the file, not events for as long as the
++/// file is ready.
++pub(super) fn watch_edges(fd: BorrowedFd, tag: Tag, flags: EventFlags) -> Result<(), Errno> {
++    let epoll_fd = EPOLL_FD.get().unwrap();
++    epoll::modify(epoll_fd, fd, tag.as_event_data(), flags | EventFlags::ET)
++}
++
+ pub(super) fn unregister_fd(fd: BorrowedFd) {
+     let epoll_fd = EPOLL_FD.get().unwrap();
+     epoll::delete(epoll_fd, fd).ok();

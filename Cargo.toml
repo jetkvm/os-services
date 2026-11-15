@@ -67,6 +67,12 @@ x11rb = "0.13"
 wl-clipboard-rs = "0.9"
 wayland-client = "0.31"
 
+# nusb 0.2.7 with one change: on Linux it reaps the transfers that complete
+# after the kernel reports the device as disconnected. See
+# vendor/nusb/UPSTREAM.md.
+[patch.crates-io]
+nusb = { path = "vendor/nusb" }
+
 [profile.release]
 lto = true
 codegen-units = 1
