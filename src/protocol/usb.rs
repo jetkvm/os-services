@@ -295,8 +295,8 @@ pub trait Transmit: Send {
     ) -> Result<(), Box<dyn Error>>;
 }
 
-/// What a session uses of a bulk endpoint. The tests put in its place an
-/// endpoint whose transfers never complete.
+/// What a session uses of a bulk endpoint. The tests put in its place
+/// endpoints whose cancelled transfers complete late or never.
 pub trait BulkEndpoint: Send {
     fn max_packet_size(&self) -> usize;
     fn submit(&mut self, buffer: Buffer);
@@ -494,14 +494,20 @@ impl<E: BulkEndpoint> Drop for UsbRx<E> {
 /// complete. Cancellation completes asynchronously, and the endpoint stays
 /// owned until its transfers are reaped, so no other session overlaps them.
 ///
-/// The wait ends after REAP_TIMEOUT, because the transfers of a KVM that
-/// disconnects can stay in flight for good. On Linux, nusb stops reaping a
-/// device at the first reap that the kernel answers with ENODEV, and the
-/// kernel answers so from the moment it marks the device as gone, which is
-/// before it completes the device's transfers. The session thread joins the
-/// thread that waits here, so a wait without an end stops the sender for
-/// good. The transfers that are left belong to a device that is gone: no
-/// session can overlap them. nusb keeps their buffers and the device file.
+/// The wait ends after REAP_TIMEOUT. The limit is a backstop for a reap that
+/// does not occur: the session thread joins the thread that waits here, so
+/// a wait without an end stops the sender for good. The KVM can be attached
+/// when the limit ends the wait, because a host controller can need more
+/// time than that to cancel a transfer. nusb, with the change in
+/// vendor/nusb, reaps the transfers that are left when they complete, and
+/// then releases their buffers, the interface and the device file. A later
+/// session on a KVM that is still attached cannot overlap them: its claim
+/// of the interface fails with EBUSY until they complete.
+///
+/// Only this wait has a limit. The control transfers and the claim of the
+/// interface (`reset_session`, `claim`) have no limit of their own: the
+/// time-out of a control transfer only cancels it, and its `wait()` ends
+/// when nusb reaps it.
 fn cancel_and_reap(endpoint: &mut impl BulkEndpoint) {
     endpoint.cancel_all();
     let deadline = Instant::now() + REAP_TIMEOUT;
@@ -520,6 +526,8 @@ fn cancel_and_reap(endpoint: &mut impl BulkEndpoint) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nusb::transfer::TransferError;
+    use std::sync::atomic::AtomicUsize;
 
     const KVM: &str = "JetKVM USB Emulation Device (399b:0001)";
 
@@ -556,15 +564,67 @@ mod tests {
         fn cancel_all(&mut self) {}
     }
 
-    /// Whether `teardown` ends within `limit`, on a thread that the test
-    /// leaves behind if it does not.
-    fn ends_within(limit: Duration, teardown: impl FnOnce() + Send + 'static) -> bool {
+    /// An endpoint that completes its transfers some time after a cancel,
+    /// as the endpoint of an attached KVM does: nothing completes at the
+    /// first polls after the cancel, then one transfer completes at each
+    /// poll.
+    struct CompletesAfterCancel {
+        /// The transfers in flight. The test keeps a clone.
+        pending: Arc<AtomicUsize>,
+        /// The polls that are left before the cancelled transfers complete;
+        /// `None` before the cancel.
+        polls_before_completion: Option<u32>,
+        cancel_at_submit: Option<Arc<AtomicBool>>,
+    }
+
+    impl BulkEndpoint for CompletesAfterCancel {
+        fn max_packet_size(&self) -> usize {
+            512
+        }
+
+        fn submit(&mut self, _: Buffer) {
+            self.pending.fetch_add(1, Ordering::AcqRel);
+            if let Some(cancelled) = &self.cancel_at_submit {
+                cancelled.store(true, Ordering::Release);
+            }
+        }
+
+        fn pending(&self) -> usize {
+            self.pending.load(Ordering::Acquire)
+        }
+
+        fn wait_next_complete(&mut self, timeout: Duration) -> Option<Completion> {
+            if self.polls_before_completion == Some(0) && self.pending() != 0 {
+                self.pending.fetch_sub(1, Ordering::AcqRel);
+                return Some(Completion {
+                    buffer: Buffer::new(0),
+                    actual_len: 0,
+                    status: Err(TransferError::Cancelled),
+                });
+            }
+            if let Some(polls) = &mut self.polls_before_completion {
+                *polls = polls.saturating_sub(1);
+            }
+            thread::sleep(timeout);
+            None
+        }
+
+        fn cancel_all(&mut self) {
+            self.polls_before_completion = Some(3);
+        }
+    }
+
+    /// What `teardown` returns if it ends within `limit`. If it does not,
+    /// the test leaves its thread behind.
+    fn result_within<T: Send + 'static>(
+        limit: Duration,
+        teardown: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
         let (ended, end) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            teardown();
-            let _ = ended.send(());
+            let _ = ended.send(teardown());
         });
-        end.recv_timeout(limit).is_ok()
+        end.recv_timeout(limit).ok()
     }
 
     /// The reader thread drops its half when the session ends, and the
@@ -581,7 +641,27 @@ mod tests {
         };
         rx.arm();
         assert_eq!(rx.endpoint.pending(), READ_QUEUE_DEPTH);
-        assert!(ends_within(REAP_TIMEOUT * 2, move || drop(rx)));
+        assert!(result_within(REAP_TIMEOUT * 2, move || drop(rx)).is_some());
+    }
+
+    /// A session that follows on the same KVM must not overlap the reads of
+    /// this one: the drop returns only when they have completed.
+    #[test]
+    fn the_read_half_closes_after_its_cancelled_reads_complete() {
+        let pending = Arc::new(AtomicUsize::new(0));
+        let mut rx = UsbRx {
+            endpoint: CompletesAfterCancel {
+                pending: pending.clone(),
+                polls_before_completion: None,
+                cancel_at_submit: None,
+            },
+            buffer: Vec::new(),
+            cancelled: Arc::default(),
+        };
+        rx.arm();
+        assert_eq!(pending.load(Ordering::Acquire), READ_QUEUE_DEPTH);
+        drop(rx);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
     }
 
     /// The writer thread ends with the write, and the session thread joins
@@ -596,9 +676,25 @@ mod tests {
             },
             cancelled,
         };
-        assert!(ends_within(REAP_TIMEOUT * 2, move || {
-            assert!(tx.send(&codec::ping()).is_err());
-        }));
+        let failed = result_within(REAP_TIMEOUT * 2, move || tx.send(&codec::ping()).is_err());
+        assert_eq!(failed, Some(true));
+    }
+
+    /// The write returns only when its cancelled transfer has completed.
+    #[test]
+    fn a_cancelled_write_fails_after_its_transfer_completes() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(AtomicUsize::new(0));
+        let mut tx = UsbTx {
+            endpoint: CompletesAfterCancel {
+                pending: pending.clone(),
+                polls_before_completion: None,
+                cancel_at_submit: Some(cancelled.clone()),
+            },
+            cancelled,
+        };
+        assert!(tx.send(&codec::ping()).is_err());
+        assert_eq!(pending.load(Ordering::Acquire), 0);
     }
     const OTHER: &str = "USB Emulation Device (1d6b:0104)";
 
