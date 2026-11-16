@@ -62,6 +62,10 @@ unsafe impl Sync for TimeoutEntry {}
 
 static DEVICES: Mutex<Slab<Weak<LinuxDevice>>> = Mutex::new(Slab::new());
 
+/// The unexpected errors from REAPURBNDELAY that end one pass of
+/// `handle_events`.
+const MAX_REAP_ERRORS: u32 = 8;
+
 pub(crate) struct LinuxDevice {
     fd: OwnedFd,
     events_id: usize,
@@ -219,13 +223,30 @@ impl LinuxDevice {
 
     /// Reaps every URB that has completed. An edge-triggered watch reports
     /// several completions as one event.
+    ///
+    /// An unexpected error does not end the pass: completed URBs can still
+    /// wait behind it, and after the device is removed no later wake-up
+    /// comes to reap them. The pass ends when no URB is left, or after
+    /// `MAX_REAP_ERRORS` errors, so an error that repeats does not keep the
+    /// event thread in the pass.
     fn handle_events(&self) {
         debug!("Handling events for device {}", self.events_id);
-        while self.reap_one() {}
+        let mut errors = 0;
+        while errors < MAX_REAP_ERRORS {
+            match self.reap_one() {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    error!("Unexpected error {e} from REAPURBNDELAY");
+                    errors += 1;
+                }
+            }
+        }
     }
 
-    /// Reaps one completed URB; false when none is left to reap now.
-    fn reap_one(&self) -> bool {
+    /// Reaps one completed URB; `Ok(false)` when none is left to reap now
+    /// (EAGAIN, or ENODEV on a disconnected device).
+    fn reap_one(&self) -> Result<bool, Errno> {
         match usbfs::reap_urb_ndelay(&self.fd) {
             Ok(urb) => {
                 let transfer_data: *mut TransferData = unsafe { &(*urb) }.usercontext.cast();
@@ -250,17 +271,14 @@ impl LinuxDevice {
 
                 // SAFETY: pointer came from submit via kernel and we're now done with it
                 unsafe { notify_completion::<super::TransferData>(transfer_data) }
-                true
+                Ok(true)
             }
-            Err(Errno::AGAIN) => false,
+            Err(Errno::AGAIN) => Ok(false),
             Err(Errno::NODEV) => {
                 self.handle_disconnect();
-                false
+                Ok(false)
             }
-            Err(e) => {
-                error!("Unexpected error {e} from REAPURBNDELAY");
-                false
-            }
+            Err(e) => Err(e),
         }
     }
 

@@ -9,7 +9,15 @@
          Arc, Mutex, MutexGuard, Weak,
      },
      task::{Context, Poll},
-@@ -66,6 +66,10 @@
+@@ -62,10 +62,18 @@
+ 
+ static DEVICES: Mutex<Slab<Weak<LinuxDevice>>> = Mutex::new(Slab::new());
+ 
++/// The unexpected errors from REAPURBNDELAY that end one pass of
++/// `handle_events`.
++const MAX_REAP_ERRORS: u32 = 8;
++
+ pub(crate) struct LinuxDevice {
      fd: OwnedFd,
      events_id: usize,
  
@@ -20,7 +28,7 @@
      /// Read from the fd, consists of device descriptor followed by configuration descriptors
      descriptors: Vec<u8>,
  
-@@ -175,6 +179,7 @@
+@@ -175,6 +183,7 @@
              LinuxDevice {
                  fd,
                  events_id,
@@ -28,30 +36,47 @@
                  descriptors,
                  #[cfg(not(target_os = "android"))]
                  sysfs,
-@@ -212,8 +217,15 @@
+@@ -212,8 +221,32 @@
          }
      }
  
 +    /// Reaps every URB that has completed. An edge-triggered watch reports
 +    /// several completions as one event.
++    ///
++    /// An unexpected error does not end the pass: completed URBs can still
++    /// wait behind it, and after the device is removed no later wake-up
++    /// comes to reap them. The pass ends when no URB is left, or after
++    /// `MAX_REAP_ERRORS` errors, so an error that repeats does not keep the
++    /// event thread in the pass.
      fn handle_events(&self) {
          debug!("Handling events for device {}", self.events_id);
-+        while self.reap_one() {}
++        let mut errors = 0;
++        while errors < MAX_REAP_ERRORS {
++            match self.reap_one() {
++                Ok(true) => {}
++                Ok(false) => break,
++                Err(e) => {
++                    error!("Unexpected error {e} from REAPURBNDELAY");
++                    errors += 1;
++                }
++            }
++        }
 +    }
 +
-+    /// Reaps one completed URB; false when none is left to reap now.
-+    fn reap_one(&self) -> bool {
++    /// Reaps one completed URB; `Ok(false)` when none is left to reap now
++    /// (EAGAIN, or ENODEV on a disconnected device).
++    fn reap_one(&self) -> Result<bool, Errno> {
          match usbfs::reap_urb_ndelay(&self.fd) {
              Ok(urb) => {
                  let transfer_data: *mut TransferData = unsafe { &(*urb) }.usercontext.cast();
-@@ -238,23 +250,59 @@
+@@ -238,20 +271,53 @@
  
                  // SAFETY: pointer came from submit via kernel and we're now done with it
                  unsafe { notify_completion::<super::TransferData>(transfer_data) }
-+                true
++                Ok(true)
              }
 -            Err(Errno::AGAIN) => {}
-+            Err(Errno::AGAIN) => false,
++            Err(Errno::AGAIN) => Ok(false),
              Err(Errno::NODEV) => {
 -                debug!("Device {} disconnected", self.events_id);
 -
@@ -60,16 +85,16 @@
 -                // keep the event thread from spinning because we won't receive further events.
 -                // The drop impl will try to unregister again, but that's ok.
 -                events::unregister_fd(self.fd.as_fd());
+-            }
+-            Err(e) => {
+-                error!("Unexpected error {e} from REAPURBNDELAY");
 +                self.handle_disconnect();
-+                false
++                Ok(false)
              }
-             Err(e) => {
-                 error!("Unexpected error {e} from REAPURBNDELAY");
-+                false
-             }
-         }
-     }
- 
++            Err(e) => Err(e),
++        }
++    }
++
 +    /// REAPURBNDELAY returned ENODEV: the device is disconnected, and no URB
 +    /// has completed that is not reaped.
 +    ///
@@ -106,12 +131,9 @@
 +                self.events_id
 +            );
 +            events::unregister_fd(self.fd.as_fd());
-+        }
-+    }
-+
-     pub(crate) fn handle_timer_epoll(id: usize) {
-         let device = DEVICES.lock().unwrap().get(id).and_then(|w| w.upgrade());
-         if let Some(device) = device {
+         }
+     }
+ 
 --- a/src/platform/linux_usbfs/events.rs
 +++ b/src/platform/linux_usbfs/events.rs
 @@ -79,6 +79,14 @@
