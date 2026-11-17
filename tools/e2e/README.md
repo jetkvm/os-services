@@ -21,7 +21,7 @@ go run ./e2e [-targets mac/mini-mac,ubuntu/mini-devbox] [-checks files,video] la
 1. `e2e` builds the installer for each operating system that a target uses. The builds run at the same time. See [Builds](#builds).
 2. For each target in the lab file, in order, `e2e` does these steps:
    1. It connects the USB of the KVM to the computer, by cable or over USB/IP.
-   2. It connects to the KVM over WebRTC, as the web page of the KVM does. A JetKVM has one session at a time, so this ends the session of a web page that is open on the KVM.
+   2. It connects to the KVM over WebRTC, as the web page of the KVM does. A JetKVM has one session at a time, so this ends the session of a web page that is open on the KVM. If the KVM has a switch for OS Services and the switch is off, `e2e` turns it on.
    3. It copies the installer to the computer over SSH, installs it, approves the key of the KVM, and starts the service.
    4. It runs the checks. The first check that fails ends the target.
    5. It restores the OS Services settings of the KVM, stops the service, and disconnects the USB.

@@ -117,6 +117,15 @@ func Run(ctx context.Context, t Target, installer string, work func(context.Cont
 		return r
 	}
 	defer undo("restore the KVM's settings", func(ctx context.Context) error { return k.SetSettings(ctx, saved) })
+	// A KVM with a switch for OS Services has no USB interface for the
+	// service while the switch is off. A KVM without the switch has no
+	// "enabled" in its settings and always has the interface.
+	if enabled, has := saved["enabled"].(bool); has && !enabled {
+		logf("turn OS Services on at the KVM")
+		if r.Err = k.SetSettings(ctx, map[string]any{"enabled": true}); r.Err != nil {
+			return r
+		}
+	}
 	logf("install %s with KVM %s approved", filepath.Base(installer), state.OSServices.Fingerprint)
 	if r.Err = t.Computer.Install(ctx, installer, state.OSServices.Fingerprint); r.Err != nil {
 		return r
