@@ -8,7 +8,10 @@ use crate::protocol::{
     CLIPBOARD_MAX_TEXT,
 };
 use std::{
-    sync::{mpsc, Mutex, MutexGuard, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex, MutexGuard, OnceLock,
+    },
     thread,
     time::Duration,
 };
@@ -36,16 +39,52 @@ struct GetResult {
 
 static WORKER: OnceLock<Mutex<mpsc::Sender<Request>>> = OnceLock::new();
 
+/// A write also sets the primary selection: the capability this session
+/// registered with.
+static WRITES_PRIMARY: AtomicBool = AtomicBool::new(false);
+
 /// Advertises access only when the clipboard opens, so a guest without one
 /// (a Linux session whose compositor exposes no clipboard, say) sends no
 /// capability and the KVM keeps its keystroke and screen-text fallbacks.
-pub fn capabilities() -> ClipboardCapabilities {
+///
+/// On Linux no one shortcut pastes everywhere: a terminal takes Ctrl+V for
+/// a control character. Shift+Insert pastes in both, the primary selection
+/// in a terminal and the clipboard elsewhere, so for a KVM that takes the
+/// flag (`kvm_takes_primary`) a write sets both.
+pub fn capabilities(kvm_takes_primary: bool) -> ClipboardCapabilities {
     let available = call(Request::Probe, false);
+    let primary = available && kvm_takes_primary && primary_supported();
+    WRITES_PRIMARY.store(primary, Ordering::Release);
     ClipboardCapabilities {
         read: available,
         write: available,
+        primary,
         os: guest_os(),
     }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+use linux::primary_supported;
+
+#[cfg(any(target_os = "macos", windows))]
+fn primary_supported() -> bool {
+    false
+}
+
+/// Sets the clipboard, and the primary selection when the session
+/// registered it. The primary selection goes first: a KVM that pastes with
+/// Shift+Insert must not find the new text in one and old text in the other,
+/// and a failure here leaves both as they were.
+fn write(clipboard: &mut arboard::Clipboard, text: String) -> Result<(), arboard::Error> {
+    #[cfg(not(any(target_os = "macos", windows)))]
+    if WRITES_PRIMARY.load(Ordering::Acquire) {
+        use arboard::{LinuxClipboardKind, SetExtLinux};
+        clipboard
+            .set()
+            .clipboard(LinuxClipboardKind::Primary)
+            .text(text.clone())?;
+    }
+    clipboard.set_text(text)
 }
 
 fn guest_os() -> GuestOs {
@@ -148,7 +187,7 @@ fn serve(requests: mpsc::Receiver<Request>) {
             }
             Request::Set(text, reply) => {
                 let status = match clipboard.as_mut() {
-                    Some(handle) => match handle.set_text(text) {
+                    Some(handle) => match write(handle, text) {
                         Ok(()) => ClipboardStatus::Ok,
                         Err(err) => {
                             eprintln!("ipkvm-os-services: clipboard write failed: {err}");

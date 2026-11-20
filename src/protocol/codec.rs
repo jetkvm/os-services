@@ -81,7 +81,9 @@ pub fn registration(registration: &Registration) -> io::Result<Message> {
             Message::new(VIDEO_SERVICE, VIDEO_CAPABILITIES, vec![0; 16])
         }
         Registration::Clipboard(capabilities) => {
-            let flags = u32::from(capabilities.read) | u32::from(capabilities.write) << 1;
+            let flags = u32::from(capabilities.read)
+                | u32::from(capabilities.write) << 1
+                | u32::from(capabilities.primary) << 2;
             let mut payload = flags.to_le_bytes().to_vec();
             payload.extend_from_slice(&[capabilities.os as u8, 0, 0, 0]);
             Message::new(CLIPBOARD_SERVICE, CLIPBOARD_CAPABILITIES, payload)
@@ -843,6 +845,17 @@ mod tests {
     }
 
     #[test]
+    fn only_a_kvm_that_says_so_takes_the_primary_selection_flag() {
+        let config = |json: &str| match record(SESSION_SERVICE, SESSION_CONFIG, json.as_bytes()) {
+            Ok(Some(ControlRecord::SessionConfig(settings))) => settings,
+            other => panic!("not a session.config: {other:?}"),
+        };
+        let policy = r#""terminal_enabled":true,"files_enabled":false,"capture_display":"""#;
+        assert!(!config(&format!("{{{policy}}}")).clipboard_primary);
+        assert!(config(&format!(r#"{{{policy},"clipboard_primary":true}}"#)).clipboard_primary);
+    }
+
+    #[test]
     fn writes_registrations() {
         let video = registration(&Registration::Video(VideoCapabilities::new(true))).unwrap();
         assert_eq!(
@@ -861,10 +874,19 @@ mod tests {
         let clipboard = registration(&Registration::Clipboard(ClipboardCapabilities {
             read: true,
             write: false,
+            primary: false,
             os: GuestOs::Linux,
         }))
         .unwrap();
         assert_eq!(clipboard.payload, [1, 0, 0, 0, 3, 0, 0, 0]);
+        let with_primary = registration(&Registration::Clipboard(ClipboardCapabilities {
+            read: true,
+            write: true,
+            primary: true,
+            os: GuestOs::Linux,
+        }))
+        .unwrap();
+        assert_eq!(with_primary.payload, [7, 0, 0, 0, 3, 0, 0, 0]);
         let files = registration(&Registration::File(FileCapabilities { receive: true })).unwrap();
         assert_eq!(files.payload, [1, 0, 0, 0]);
         let update = registration(&Registration::Update(UpdatePackage::MacosAarch64)).unwrap();

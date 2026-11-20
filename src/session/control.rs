@@ -167,6 +167,9 @@ pub struct ControlLink<'a> {
     deferred: VecDeque<ControlRecord>,
     /// The KVM answers the clipboard registration with its setting.
     clipboard_enabled: bool,
+    /// The KVM said at the session's start that it takes the
+    /// primary-selection flag in clipboard.capabilities.
+    clipboard_primary: bool,
     next_report: Instant,
     shutdown: &'a AtomicBool,
     /// The update package that completed; the session ends to install it.
@@ -192,6 +195,7 @@ impl<'a> ControlLink<'a> {
             sets_display_mode: crate::video::display::SETS_MODE && settings.display_mode_by_sender,
             deferred: VecDeque::new(),
             clipboard_enabled: false,
+            clipboard_primary: settings.clipboard_primary,
             next_report: Instant::now(),
             shutdown,
             staged,
@@ -259,6 +263,11 @@ impl<'a> ControlLink<'a> {
 
     pub fn files_allowed(&self) -> bool {
         self.files_allowed
+    }
+
+    /// The KVM takes the primary-selection flag of the clipboard service.
+    pub fn clipboard_primary(&self) -> bool {
+        self.clipboard_primary
     }
 
     /// One pass: reports the displays when due, serves the session policy,

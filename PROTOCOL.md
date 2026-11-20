@@ -184,6 +184,7 @@ The KVM owns the session policy, and the sender has none of its own. The KVM sen
 | `files_enabled` | boolean | File reception is allowed. |
 | `capture_display` | string | The display to capture, by a name from `session.info`. If it is empty, the sender selects the display. |
 | `display_mode_by_sender` | boolean | Optional. False if it is not present. It does not change during a session. If it is true, the KVM accepts bit 2 of `codec_flags` in `video.capabilities` (see [Display mode](#display-mode)). |
+| `clipboard_primary` | boolean | Optional. False if it is not present. It does not change during a session. If it is true, the KVM accepts bit 2 of `flags` in `clipboard.capabilities` (see [Clipboard service](#clipboard-service)). |
 
 `terminal_enabled`, `files_enabled` and `capture_display` are required. The sender ignores unknown members, and applies each change immediately:
 
@@ -427,7 +428,7 @@ The clipboard service copies plain text between the browser and the target. The 
 
 | Offset | Size | Field | Description |
 |---:|---:|---|---|
-| 0 | 4 | `flags` | Bit 0: read (`clipboard.get`). Bit 1: write (`clipboard.set`). Other bits zero. |
+| 0 | 4 | `flags` | Bit 0: read (`clipboard.get`). Bit 1: write (`clipboard.set`). Bit 2: `clipboard.set` also writes the primary selection. Set bit 2 only with bit 1, and only if `clipboard_primary` is true in `session.config`. Other bits zero. |
 | 4 | 1 | `os` | Target OS: 0 Unknown, 1 Windows, 2 macOS, 3 Linux. |
 | 5 | 3 | `reserved` | Zero. |
 
@@ -451,7 +452,9 @@ The clipboard service copies plain text between the browser and the target. The 
 
 - The sender answers `clipboard.get` with `clipboard.content`, and `clipboard.set` with `clipboard.status`.
 - The sender sets the read and write bits only if it can open the target's clipboard. With neither bit set, the message withdraws the service, and the KVM fails every open request.
-- The KVM uses `os` to select the paste shortcut that it types after `clipboard.set`.
+- The KVM uses `os` to select the paste shortcut that it types after `clipboard.set`: Cmd+V for macOS, and Ctrl+V for the other values.
+- On Linux, a terminal does not paste on Ctrl+V. A Linux sender that can write the primary selection sets bit 2. Then each `clipboard.set` writes the text to the clipboard and to the primary selection, and the KVM types Shift+Insert: a terminal pastes the primary selection, and other applications paste the clipboard. If the sender cannot write one of the two, it answers Failed.
+- A KVM that does not set `clipboard_primary` treats bit 2 as an error, as it does for all unknown bits.
 - Sharing is off until the sender receives `clipboard.config`. The KVM sends it after each `clipboard.capabilities` and after each change of the sharing setting. While sharing is off, the KVM sends no requests, and the sender answers each request with Unsupported.
 - A `request_id` identifies one open request. The sender answers each request exactly one time, in any order. After 2 seconds, the KVM stops waiting and ignores a late answer.
 - Text is at most 65,528 bytes. The sender cuts longer text at a character boundary and sets `truncated`.

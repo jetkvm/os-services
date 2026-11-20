@@ -59,6 +59,14 @@ pub fn concealed() -> Result<Checked, Box<dyn Error>> {
     })
 }
 
+/// Whether the backend that arboard writes to has a primary selection: X11
+/// always has one, and Wayland data control has one when the compositor
+/// offers it.
+pub fn primary_supported() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_none()
+        || !matches!(utils::is_primary_selection_supported(), Ok(false))
+}
+
 /// Checks the types of one seat's clipboard and, when it holds no secret,
 /// reads its text from the same seat.
 fn wayland_check() -> Result<Checked, Box<dyn Error>> {
