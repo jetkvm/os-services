@@ -186,7 +186,7 @@ When the service sends no video, the KVM shows its HDMI capture. The clipboard, 
 <details>
 <summary><code>[KMSVAAPI] create cursor VPP config: the requested VAEntryPoint is not supported</code></summary>
 
-The KVM's web UI shows no video from OS Services, and the picture stays grey. The other functions work. After this line, the log shows `ipkvm-os-services: video not available: the capture pipeline failed to build; the log has why`. The two lines repeat every 2 seconds.
+The KVM's web UI shows no video from OS Services. The other functions work. After this line, the log shows `ipkvm-os-services: video not available: the capture pipeline failed to build; the log has why`. The first line repeats while the problem stays.
 
 **Cause:** The Intel VAAPI driver has no video processing function. The service uses this function to draw the mouse pointer into the video. On some Intel GPUs, the free driver package `intel-media-va-driver` does not have this function. This problem occurred on Intel UHD Graphics 630, in a Lenovo M90q with Ubuntu 26.04. Then `vainfo` shows no line with `VAProfileNone` and `VAEntrypointVideoProc`. Newer Intel GPUs, for example the Intel N100, have the function with the free driver.
 
@@ -197,7 +197,7 @@ The KVM's web UI shows no video from OS Services, and the picture stays grey. Th
 <details>
 <summary><code>Failed to initialise VAAPI connection: -1 (unknown libva error)</code></summary>
 
-After this line, the log shows `Failed to created derived device context: -5`, `[KMSVAAPI] graph config failed: -5` and `ipkvm-os-services: video not available: the capture pipeline failed to build; the log has why`. The lines repeat every 2 seconds.
+After this line, the log shows `Failed to created derived device context: -5`, `[KMSVAAPI] graph config failed: -5` and `ipkvm-os-services: video not available: the capture pipeline failed to build; the log has why`. The first three lines repeat while the problem stays.
 
 **Cause:** The VAAPI driver for the GPU did not load. No driver package is installed, or the wrong driver is selected, for example by the `LIBVA_DRIVER_NAME` environment variable.
 
@@ -277,19 +277,6 @@ To get the resolution of the KVM again, do one of these steps in the KVM's web U
 - Select a different resolution, then select the first resolution again.
 
 On Linux, the service does not set the resolution. Each time that you turn on video or change the resolution or the layout, the KVM connects its display again, and the desktop uses the resolution of the KVM.
-
-</details>
-
-## Clipboard
-
-<details>
-<summary><code>ipkvm-os-services: clipboard worker did not answer; replacing it</code></summary>
-
-The log shows this line near the start of a session. Then copy and paste through OS Services do not work until the service restarts.
-
-**Cause:** Linux: the service checks the clipboard one time when a session starts, with a time limit of 1.5 seconds. Right after you sign in, the desktop can answer too slowly.
-
-**Fix:** Run `systemctl --user restart ipkvm-os-services`.
 
 </details>
 
