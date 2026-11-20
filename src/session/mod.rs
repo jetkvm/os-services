@@ -28,6 +28,11 @@ use worker::Worker;
 pub const CONTROL_POLL: Duration = Duration::from_millis(50);
 /// How often the capture probes run while video is unregistered.
 const CAPTURE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+/// The longest wait between probes that fail for the same reason. Each
+/// probe that builds the pipeline writes the libraries' own lines to the
+/// log, so a failure that stays, such as a missing driver, must not write
+/// them every CAPTURE_PROBE_INTERVAL.
+const CAPTURE_PROBE_INTERVAL_MAX: Duration = Duration::from_secs(30);
 /// How long video stays withdrawn after a capture or encode failure. A
 /// display that does not come back, or an encoder that does not open, must
 /// not make the KVM re-plug its display at every probe.
@@ -223,7 +228,8 @@ fn withdraw_video(
 
 /// Serves the session until the capture probes pass; None when the session
 /// is asked to stop. The probes run every CAPTURE_PROBE_INTERVAL, and only
-/// while the display they need is present.
+/// while the display they need is present. While a probe that ran fails for
+/// the same reason again, the wait doubles up to CAPTURE_PROBE_INTERVAL_MAX.
 fn wait_for_capture(
     first_probe: Duration,
     paused: Option<&PausedDisplay>,
@@ -231,6 +237,7 @@ fn wait_for_capture(
     link: &mut ControlLink,
 ) -> Result<Option<CaptureBackend>, Box<dyn Error>> {
     let mut next_probe = Instant::now() + first_probe;
+    let mut interval = CAPTURE_PROBE_INTERVAL;
     let mut last_reason = None;
     let mut probe = Probe::default();
     loop {
@@ -246,16 +253,19 @@ fn wait_for_capture(
             probe.join();
             return Err(err);
         }
-        let result = match probe.result() {
-            Some(result) => Some(result),
+        // Only a probe that ran wrote to the log; the checks before it
+        // are silent, and what they wait for (a display, a permission the
+        // user grants) must start video soon after it changes.
+        let (result, probed) = match probe.result() {
+            Some(result) => (Some(result), true),
             None if probe.running() || Instant::now() < next_probe => continue,
-            None if !capture_display_present(paused, link)? => None,
+            None if !capture_display_present(paused, link)? => (None, false),
             None => match capture_allowed() {
                 Ok(()) => {
                     probe.start();
                     continue;
                 }
-                Err(reason) => Some(Err(reason)),
+                Err(reason) => (Some(Err(reason)), false),
             },
         };
         match result {
@@ -267,11 +277,18 @@ fn wait_for_capture(
                     video::missing_encoder::tell_once();
                 }
                 last_reason = Some(reason);
+                interval = CAPTURE_PROBE_INTERVAL;
             }
-            _ => {}
+            Some(Err(_)) if probed => interval = next_probe_interval(interval),
+            _ => interval = CAPTURE_PROBE_INTERVAL,
         }
-        next_probe = Instant::now() + CAPTURE_PROBE_INTERVAL;
+        next_probe = Instant::now() + interval;
     }
+}
+
+/// The wait after a probe failed for the same reason as the one before.
+fn next_probe_interval(interval: Duration) -> Duration {
+    (interval * 2).min(CAPTURE_PROBE_INTERVAL_MAX)
 }
 
 /// A capture probe on its own thread. An encoder probe takes seconds (2.2 s
