@@ -18,6 +18,19 @@ The service writes a line to its log when a session opens or closes, when video 
 
 Some fixes run a command. In these commands, `ipkvm-os-services` is the full path of the program on the computer. For the path on each operating system, see [Where the program is](install.md#where-the-program-is).
 
+### Collect diagnostics on Linux
+
+On Linux, the service is a systemd user unit with the name `ipkvm-os-services`. To find the cause of a problem, run these commands and keep their output:
+
+| Command | What it shows |
+|---|---|
+| `journalctl --user -u ipkvm-os-services -b --no-pager \| tail -n 300` | The last 300 lines of the log since the computer started. |
+| `echo $XDG_SESSION_TYPE; id; ls -l /dev/dri` | The session type (Wayland or X11), the groups of your account, and the access rights of the GPU device files. |
+| `vainfo 2>&1 \| grep -iE 'driver\|h264\|VideoProc'` | The VAAPI driver that loads, and if it has H.264 and video processing functions. |
+| `systemctl --user show-environment \| grep -E 'DISPLAY\|WAYLAND'` | The display variables that the service gets from the user session. |
+
+To restart the service, run `systemctl --user restart ipkvm-os-services`.
+
 ## The service does not connect to the KVM
 
 <details>
@@ -167,6 +180,33 @@ When the service sends no video, the KVM shows its HDMI capture. The clipboard, 
 **Cause:** The VAAPI driver has no H.264 encoder, and the system has no OpenH264 library.
 
 **Fix:** Install OpenH264: on Fedora, the `openh264` package, and on other distributions, `libopenh264`. See [Video encoders on Linux](install.md#video-encoders-on-linux).
+
+</details>
+
+<details>
+<summary><code>[KMSVAAPI] create cursor VPP config: the requested VAEntryPoint is not supported</code></summary>
+
+The KVM's web UI shows no video from OS Services. The other functions work. After this line, the log shows `ipkvm-os-services: video not available: the capture pipeline failed to build; the log has why`. The first line repeats while the problem stays.
+
+**Cause:** The Intel VAAPI driver has no video processing function. The service uses this function to draw the mouse pointer into the video. On some Intel GPUs, the free driver package `intel-media-va-driver` does not have this function. This problem occurred on Intel UHD Graphics 630, in a Lenovo M90q with Ubuntu 26.04. Then `vainfo` shows no line with `VAProfileNone` and `VAEntrypointVideoProc`. Newer Intel GPUs, for example the Intel N100, have the function with the free driver.
+
+**Fix:** Install the non-free driver package `intel-media-va-driver-non-free`. This package replaces the free package. On Ubuntu, the package is in the `multiverse` component. On Debian, the package is in the `non-free` component. Then run `systemctl --user restart ipkvm-os-services`.
+
+</details>
+
+<details>
+<summary><code>Failed to initialise VAAPI connection: -1 (unknown libva error)</code></summary>
+
+After this line, the log shows `Failed to created derived device context: -5`, `[KMSVAAPI] graph config failed: -5` and `ipkvm-os-services: video not available: the capture pipeline failed to build; the log has why`. The first three lines repeat while the problem stays.
+
+**Cause:** The VAAPI driver for the GPU did not load. No driver package is installed, or the wrong driver is selected, for example by the `LIBVA_DRIVER_NAME` environment variable.
+
+**Fix:**
+
+1. Run `vainfo`. If it shows an error and no list of profiles, the driver did not load.
+2. Install the VAAPI driver for the GPU. For Intel, install `intel-media-va-driver` or `intel-media-va-driver-non-free`. For AMD, install the Mesa VA drivers package of your distribution.
+3. Make sure that `LIBVA_DRIVER_NAME` is not set to a wrong value.
+4. Run `systemctl --user restart ipkvm-os-services`.
 
 </details>
 
