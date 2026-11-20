@@ -187,7 +187,9 @@ fn serve_video(
 /// session.config re-registers what it changes. An installation that cannot
 /// replace itself offers no updates.
 fn register_services(worker: &Worker, link: &ControlLink, installation: Option<&Installation>) {
-    worker.register(Registration::Clipboard(clipboard::capabilities()));
+    worker.register(Registration::Clipboard(clipboard::capabilities(
+        link.clipboard_primary(),
+    )));
     worker.register(Registration::Terminal {
         shell: link.terminal_enabled(),
     });
