@@ -12,7 +12,7 @@ pub mod worker;
 
 use crate::approval::{Approval, PinStore};
 use crate::protocol::{self, ControlRecord, Registration, VideoConfig};
-use crate::services::{clipboard, file_transfer, update};
+use crate::services::{file_transfer, update};
 use crate::supervisor::update::{Installation, Staged};
 use crate::video::{self, display, stream, CaptureFailure};
 use control::{ControlLink, ControlReader};
@@ -186,8 +186,8 @@ fn serve_video(
 /// register at once with the policy the session opened with; a later
 /// session.config re-registers what it changes. An installation that cannot
 /// replace itself offers no updates.
-fn register_services(worker: &Worker, link: &ControlLink, installation: Option<&Installation>) {
-    worker.register(Registration::Clipboard(clipboard::capabilities()));
+fn register_services(worker: &Worker, link: &mut ControlLink, installation: Option<&Installation>) {
+    link.register_clipboard(worker);
     worker.register(Registration::Terminal {
         shell: link.terminal_enabled(),
     });

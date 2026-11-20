@@ -173,6 +173,8 @@ pub struct ControlLink<'a> {
     staged: update::StagedUpdate,
     /// The user's approval of this KVM; the session ends when it is gone.
     approval: Approval,
+    /// A clipboard that did not open at the session's start is probed again.
+    clipboard_retry: clipboard::Retry,
 }
 
 impl<'a> ControlLink<'a> {
@@ -196,6 +198,7 @@ impl<'a> ControlLink<'a> {
             shutdown,
             staged,
             approval,
+            clipboard_retry: clipboard::Retry::default(),
         }
     }
 
@@ -278,6 +281,9 @@ impl<'a> ControlLink<'a> {
             worker.reply(ServiceReply::SessionInfo { displays });
             self.next_report = Instant::now() + SESSION_INFO_INTERVAL;
         }
+        if self.clipboard_retry.due(Instant::now()) {
+            self.retry_clipboard(worker);
+        }
         // Shell output that collects for its interval ends the wait when
         // the interval does.
         if let Some(due) = self.terminals.output_due_in() {
@@ -295,6 +301,31 @@ impl<'a> ControlLink<'a> {
             worker.reply(ServiceReply::Terminal(reply));
         }
         Ok(())
+    }
+
+    /// Registers the clipboard at the session's start. A desktop that is
+    /// still starting may not open its clipboard yet, so a failed probe is
+    /// tried again later in the session instead of leaving it off.
+    pub fn register_clipboard(&mut self, worker: &Worker) {
+        let capabilities = clipboard::capabilities();
+        if !capabilities.read {
+            eprintln!("ipkvm-os-services: clipboard not available at session start; trying again");
+            self.clipboard_retry.failed(Instant::now());
+        }
+        worker.register(crate::protocol::Registration::Clipboard(capabilities));
+    }
+
+    /// One probe of the retry; the clipboard registers again when it opens.
+    fn retry_clipboard(&mut self, worker: &Worker) {
+        if clipboard::opens() {
+            eprintln!("ipkvm-os-services: clipboard available now; registering it again");
+            self.clipboard_retry = clipboard::Retry::default();
+            worker.register(crate::protocol::Registration::Clipboard(
+                clipboard::capabilities(),
+            ));
+        } else if !self.clipboard_retry.failed(Instant::now()) {
+            eprintln!("ipkvm-os-services: clipboard still not available; stopped trying");
+        }
     }
 
     /// Serves one record, or keeps it for the streaming loop.

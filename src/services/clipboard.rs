@@ -24,6 +24,8 @@ const CALL_TIMEOUT: Duration = Duration::from_millis(1500);
 /// handle and serves every request until a call hangs and it is replaced.
 enum Request {
     Probe(mpsc::Sender<bool>),
+    /// A probe that logs nothing when the clipboard does not open.
+    Recheck(mpsc::Sender<bool>),
     Get(mpsc::Sender<GetResult>),
     Set(String, mpsc::Sender<ClipboardStatus>),
 }
@@ -69,6 +71,7 @@ pub fn answer(record: &ControlRecord, enabled: bool) -> Option<ClipboardReply> {
             } else {
                 without_text(ClipboardStatus::Unsupported)
             };
+            log_answer("get", result.status, result.text.len());
             Some(ClipboardReply::Content {
                 request_id: *request_id,
                 status: result.status,
@@ -76,18 +79,64 @@ pub fn answer(record: &ControlRecord, enabled: bool) -> Option<ClipboardReply> {
                 text: result.text,
             })
         }
-        ControlRecord::ClipboardSet { request_id, text } => Some(ClipboardReply::Status {
-            request_id: *request_id,
-            status: if enabled {
+        ControlRecord::ClipboardSet { request_id, text } => {
+            let status = if enabled {
                 call(
                     |reply| Request::Set(text.clone(), reply),
                     ClipboardStatus::Failed,
                 )
             } else {
                 ClipboardStatus::Unsupported
-            },
-        }),
+            };
+            log_answer("set", status, text.len());
+            Some(ClipboardReply::Status {
+                request_id: *request_id,
+                status,
+            })
+        }
         _ => None,
+    }
+}
+
+/// The log shows whether a copy or a paste reached the sender. The text
+/// itself is never logged.
+fn log_answer(direction: &str, status: ClipboardStatus, bytes: usize) {
+    eprintln!("ipkvm-os-services: clipboard {direction} status={status:?} bytes={bytes}");
+}
+
+/// Whether the clipboard opens now. Unlike `capabilities`, it logs nothing,
+/// so the probes that follow a failed start stay quiet.
+pub fn opens() -> bool {
+    try_call(Request::Recheck).unwrap_or(false)
+}
+
+/// The waits, in seconds, between the probes that follow a failed probe at
+/// the session's start. A desktop that is still starting opens its
+/// clipboard a few seconds later, so the first waits are short. Each probe
+/// that times out stalls the session for CALL_TIMEOUT and leaves a stuck
+/// thread, so the waits grow and the probes stop after about six minutes.
+const RETRY_WAITS: [u64; 10] = [2, 4, 8, 16, 32, 60, 60, 60, 60, 60];
+
+/// When to probe again for a clipboard that did not open at the session's
+/// start. The default has no probe due.
+#[derive(Default)]
+pub struct Retry {
+    next: Option<std::time::Instant>,
+    failed: usize,
+}
+
+impl Retry {
+    pub fn due(&self, now: std::time::Instant) -> bool {
+        self.next.is_some_and(|next| now >= next)
+    }
+
+    /// Records a failed probe at `now`; false when no probe follows.
+    pub fn failed(&mut self, now: std::time::Instant) -> bool {
+        self.next = RETRY_WAITS
+            .get(self.failed)
+            .map(|&wait| now + Duration::from_secs(wait));
+        self.failed += 1;
+        self.next.is_some()
     }
 }
 
@@ -95,15 +144,22 @@ pub fn answer(record: &ControlRecord, enabled: bool) -> Option<ClipboardReply> {
 /// arrives in time, replacing the worker so the next request starts clean.
 /// A worker that died takes the same path: its reply channel closes at once.
 fn call<T>(request: impl FnOnce(mpsc::Sender<T>) -> Request, fallback: T) -> T {
+    try_call(request).unwrap_or_else(|| {
+        eprintln!("ipkvm-os-services: clipboard worker did not answer; replacing it");
+        fallback
+    })
+}
+
+/// `call` without the log line: None when no answer arrives in time.
+fn try_call<T>(request: impl FnOnce(mpsc::Sender<T>) -> Request) -> Option<T> {
     let worker = WORKER.get_or_init(|| Mutex::new(spawn()));
     let (reply, result) = mpsc::channel();
     let _ = lock(worker).send(request(reply));
     match result.recv_timeout(CALL_TIMEOUT) {
-        Ok(value) => value,
+        Ok(value) => Some(value),
         Err(_) => {
-            eprintln!("ipkvm-os-services: clipboard worker did not answer; replacing it");
             *lock(worker) = spawn();
-            fallback
+            None
         }
     }
 }
@@ -130,13 +186,15 @@ fn serve(requests: mpsc::Receiver<Request>) {
             clipboard = match arboard::Clipboard::new() {
                 Ok(handle) => Some(handle),
                 Err(err) => {
-                    eprintln!("ipkvm-os-services: clipboard unavailable: {err}");
+                    if !matches!(request, Request::Recheck(_)) {
+                        eprintln!("ipkvm-os-services: clipboard unavailable: {err}");
+                    }
                     None
                 }
             };
         }
         match request {
-            Request::Probe(reply) => {
+            Request::Probe(reply) | Request::Recheck(reply) => {
                 let _ = reply.send(clipboard.is_some());
             }
             Request::Get(reply) => {
@@ -281,6 +339,31 @@ mod tests {
         let (kept, truncated) = truncate("short".to_owned());
         assert!(!truncated);
         assert_eq!(kept, "short");
+    }
+
+    #[test]
+    fn probes_again_with_growing_waits_until_the_last() {
+        let start = std::time::Instant::now();
+        let mut retry = Retry::default();
+        assert!(!retry.due(start));
+        assert!(retry.failed(start));
+        assert!(!retry.due(start + Duration::from_millis(1999)));
+        assert!(retry.due(start + Duration::from_secs(2)));
+
+        // Each failed probe waits longer than the one before, up to a limit.
+        let mut now = start + Duration::from_secs(2);
+        let mut last_wait = Duration::ZERO;
+        while retry.failed(now) {
+            let wait = (1..=120)
+                .map(Duration::from_secs)
+                .find(|&wait| retry.due(now + wait))
+                .expect("a probe is due within two minutes");
+            assert!(wait >= last_wait);
+            last_wait = wait;
+            now += wait;
+        }
+        assert!(now - start < Duration::from_secs(10 * 60));
+        assert!(!retry.due(now + Duration::from_secs(24 * 60 * 60)));
     }
 
     #[test]
