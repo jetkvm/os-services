@@ -3,6 +3,7 @@
 //! VAAPI imports and encodes it on Intel and AMD; on NVIDIA's proprietary
 //! driver, EGL imports it and CUDA hands it to NVENC. A VAAPI driver without
 //! an H.264 encoder converts the frame, and OpenH264 encodes it on the CPU.
+//! When no GPU pipeline builds, the CPU path converts the frame as well.
 
 use crate::protocol::VideoCodec;
 use crate::video::display::{find_online, Display, DisplaySelector};
@@ -10,6 +11,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::fmt;
 use std::os::raw::c_char;
 use std::path::Path;
+use std::sync::Mutex;
 
 type PacketCallback = extern "C" fn(*const u8, i32, i32, u64, *const c_void);
 
@@ -53,12 +55,32 @@ extern "C" {
     ) -> i32;
     fn kms_nvenc_encoder_name(handle: *mut c_void) -> *const c_char;
     fn kms_nvenc_destroy(handle: *mut c_void);
+
+    fn kms_software_new_encoder(
+        device: *const c_char,
+        connector_id: u32,
+        encoder_name: *const c_char,
+        framerate: i32,
+        kbs: i32,
+        gop: i32,
+        failure: *mut i32,
+    ) -> *mut c_void;
+    fn kms_software_dimensions(handle: *mut c_void, width: *mut i32, height: *mut i32) -> i32;
+    fn kms_software_set_rate(handle: *mut c_void, framerate: i32, kbs: i32) -> i32;
+    fn kms_software_next(
+        handle: *mut c_void,
+        callback: PacketCallback,
+        obj: *const c_void,
+        force_idr: i32,
+    ) -> i32;
+    fn kms_software_encoder_name(handle: *mut c_void) -> *const c_char;
+    fn kms_software_destroy(handle: *mut c_void);
 }
 
 type NewEncoder =
     unsafe extern "C" fn(*const c_char, u32, *const c_char, i32, i32, i32, *mut i32) -> *mut c_void;
 
-/// The C functions of one backend; both backends have the same signatures.
+/// The C functions of one backend; every backend has the same signatures.
 struct Functions {
     new_encoder: NewEncoder,
     dimensions: unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32,
@@ -84,6 +106,17 @@ const NVENC: Functions = Functions {
     next: kms_nvenc_next,
     encoder_name: kms_nvenc_encoder_name,
     destroy: kms_nvenc_destroy,
+};
+
+/// The CPU path: libdrmtap brings the scanout to memory, and the CPU
+/// converts it and encodes it with OpenH264.
+const SOFTWARE: Functions = Functions {
+    new_encoder: kms_software_new_encoder,
+    dimensions: kms_software_dimensions,
+    set_rate: kms_software_set_rate,
+    next: kms_software_next,
+    encoder_name: kms_software_encoder_name,
+    destroy: kms_software_destroy,
 };
 
 /// The encoder family that takes a card's scanout. NVIDIA's proprietary
@@ -170,6 +203,22 @@ impl KmsFailure {
         }
     }
 
+    /// Whether the CPU path is worth a try after the GPU pipeline failed
+    /// this way. It needs the same library, device, helper and scanout, so
+    /// it fails the same way when one of them is missing. Every other
+    /// failure is in the GPU's own stack, whatever the vendor or the cause,
+    /// and the CPU path does without it. It encodes H.264 only.
+    fn cpu_path_may_open(self, codec: VideoCodec) -> bool {
+        codec == VideoCodec::H264
+            && !matches!(
+                self,
+                Self::LibraryUnavailable
+                    | Self::DeviceUnavailable
+                    | Self::HelperUnavailable
+                    | Self::NoScanout
+            )
+    }
+
     /// How much a failure says about the machine, for choosing which card's
     /// failure to report: shared library and helper problems first, then a
     /// scanout that can come back, then the most specific pipeline error.
@@ -217,6 +266,11 @@ pub enum Pull {
     /// The VAAPI filter graph took the frame and has no frame out yet, so
     /// nothing was encoded.
     Idle,
+    /// The CPU path grabbed the scanout, and neither the picture nor the
+    /// cursor had changed: nothing was encoded, and the capture is alive.
+    Unchanged,
+    /// The CPU path encoded a frame in which only the cursor changed.
+    PointerOnly,
     /// The scanout has another size or layout: rebuild the capture for it.
     ScanoutChanged,
     /// The grab failed, as it does while the display is re-plugging.
@@ -235,6 +289,8 @@ impl Pull {
             1 => Self::Idle,
             2 => Self::ScanoutChanged,
             3 => Self::RateRejected,
+            4 => Self::Unchanged,
+            5 => Self::PointerOnly,
             -1 => Self::GrabFailed,
             other => Self::Failed(other),
         }
@@ -263,6 +319,9 @@ extern "C" fn trampoline(data: *const u8, len: i32, key: i32, pts_us: u64, obj: 
 }
 
 impl KmsEncoder {
+    /// Opens the GPU pipeline of `backend` and, when that fails for a reason
+    /// the CPU path does not share, the CPU path. When both fail, the GPU
+    /// pipeline's failure is the one reported.
     pub fn new(
         backend: Backend,
         device: &str,
@@ -272,9 +331,37 @@ impl KmsEncoder {
         kbps: i32,
         gop: i32,
     ) -> Result<Self, KmsFailure> {
-        let functions = backend.functions();
+        let open = |functions, encoder| {
+            Self::open(
+                functions,
+                encoder,
+                device,
+                connector_id,
+                framerate,
+                kbps,
+                gop,
+            )
+        };
+        let gpu = open(backend.functions(), backend.encoder(codec));
+        let gpu_failure = gpu.as_ref().err().copied();
+        let opened = with_cpu_path(codec, gpu, || open(&SOFTWARE, "openh264_cpu"))?;
+        if let Some(why) = gpu_failure {
+            log_cpu_path(why);
+        }
+        Ok(opened)
+    }
+
+    fn open(
+        functions: &'static Functions,
+        encoder: &str,
+        device: &str,
+        connector_id: u32,
+        framerate: i32,
+        kbps: i32,
+        gop: i32,
+    ) -> Result<Self, KmsFailure> {
         let c_device = CString::new(device).expect("device path has no NUL");
-        let c_encoder = CString::new(backend.encoder(codec)).expect("encoder name has no NUL");
+        let c_encoder = CString::new(encoder).expect("encoder name has no NUL");
         let mut failure = 0i32;
         let handle = unsafe {
             (functions.new_encoder)(
@@ -300,7 +387,8 @@ impl KmsEncoder {
         })
     }
 
-    /// The encoder the pipeline opened: `Backend::encoder`, or openh264.
+    /// The encoder the pipeline opened: `Backend::encoder`, openh264, or
+    /// openh264_cpu on the CPU path.
     pub fn encoder_name(&self) -> String {
         unsafe { CStr::from_ptr((self.functions.encoder_name)(self.handle)) }
             .to_string_lossy()
@@ -334,6 +422,35 @@ impl KmsEncoder {
 impl Drop for KmsEncoder {
     fn drop(&mut self) {
         unsafe { (self.functions.destroy)(self.handle) }
+    }
+}
+
+/// The GPU pipeline that `gpu` opened, or else the CPU path when the GPU's
+/// failure allows it. When the CPU path fails too, the GPU's failure says
+/// more about the machine, and is the one returned.
+fn with_cpu_path<T>(
+    codec: VideoCodec,
+    gpu: Result<T, KmsFailure>,
+    cpu: impl FnOnce() -> Result<T, KmsFailure>,
+) -> Result<T, KmsFailure> {
+    match gpu {
+        Err(why) if why.cpu_path_may_open(codec) => cpu().map_err(|_| why),
+        gpu => gpu,
+    }
+}
+
+/// Says once per reason that video runs on the CPU path: the probes and
+/// every reopen open it again.
+fn log_cpu_path(why: KmsFailure) {
+    static LOGGED: Mutex<Option<KmsFailure>> = Mutex::new(None);
+    let mut logged = LOGGED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if logged.replace(why) != Some(why) {
+        eprintln!(
+            "kms GPU pipeline did not build ({why}); video is encoded on the CPU, \
+             with a higher CPU load and a lower frame rate"
+        );
     }
 }
 
@@ -423,7 +540,59 @@ impl CaptureTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::probe_order;
+    use super::{probe_order, with_cpu_path, KmsFailure, VideoCodec};
+
+    /// The failures users met: a VAAPI driver that does not load, and one
+    /// without video processing. Both leave the GPU pipeline unbuilt, and
+    /// the CPU path takes over.
+    #[test]
+    fn a_gpu_pipeline_that_does_not_build_gives_way_to_the_cpu_path() {
+        let opened = with_cpu_path(VideoCodec::H264, Err(KmsFailure::PipelineFailed), || {
+            Ok("cpu")
+        });
+        assert_eq!(opened, Ok("cpu"));
+        let opened = with_cpu_path(
+            VideoCodec::H264,
+            Err(KmsFailure::EncoderUnavailable),
+            || Ok("cpu"),
+        );
+        assert_eq!(opened, Ok("cpu"));
+    }
+
+    /// The CPU path's own failure would hide why the GPU failed.
+    #[test]
+    fn when_the_cpu_path_fails_too_the_gpu_failure_is_reported() {
+        let opened: Result<&str, _> =
+            with_cpu_path(VideoCodec::H264, Err(KmsFailure::RenderNodeDenied), || {
+                Err(KmsFailure::PipelineFailed)
+            });
+        assert_eq!(opened, Err(KmsFailure::RenderNodeDenied));
+    }
+
+    /// The CPU path needs the same library, device, helper and scanout, so
+    /// it is not tried without them, and there is no H.265 encoder on the
+    /// CPU. A working GPU pipeline is kept.
+    #[test]
+    fn the_cpu_path_is_not_tried_where_it_cannot_help() {
+        for failure in [
+            KmsFailure::LibraryUnavailable,
+            KmsFailure::DeviceUnavailable,
+            KmsFailure::HelperUnavailable,
+            KmsFailure::NoScanout,
+        ] {
+            let opened: Result<&str, _> = with_cpu_path(VideoCodec::H264, Err(failure), || {
+                panic!("CPU path tried after {failure:?}")
+            });
+            assert_eq!(opened, Err(failure));
+        }
+        let opened: Result<&str, _> =
+            with_cpu_path(VideoCodec::H265, Err(KmsFailure::PipelineFailed), || {
+                panic!("CPU path tried for H.265")
+            });
+        assert_eq!(opened, Err(KmsFailure::PipelineFailed));
+        let opened = with_cpu_path(VideoCodec::H264, Ok("gpu"), || panic!("CPU path tried"));
+        assert_eq!(opened, Ok("gpu"));
+    }
 
     #[test]
     fn the_capture_card_is_probed_first_and_once() {

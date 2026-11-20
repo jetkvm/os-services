@@ -104,8 +104,13 @@ fn build_kms_capture(mut build: cc::Build) -> Libraries {
         // drm_fourcc.h for the scanout formats the PRIME frames carry.
         .include("/usr/include/libdrm")
         .files(
-            ["kms_capture.cpp", "kms_vaapi.cpp", "kms_nvenc.cpp"]
-                .map(|file| format!("{native}/{file}")),
+            [
+                "kms_capture.cpp",
+                "kms_vaapi.cpp",
+                "kms_nvenc.cpp",
+                "kms_software.cpp",
+            ]
+            .map(|file| format!("{native}/{file}")),
         )
         .compile("kms_capture");
     (

@@ -55,6 +55,12 @@ enum KmsPull : int32_t {
   // The driver refused a new rate for the running encoder; build a new
   // encoder at that rate.
   KMS_PULL_RATE_REJECTED = 3,
+  // The grab worked, and neither the picture nor the cursor changed since
+  // the last frame: nothing was encoded. Only the CPU path reports it.
+  KMS_PULL_UNCHANGED = 4,
+  // A frame went through in which only the cursor changed. Only the CPU
+  // path reports it.
+  KMS_PULL_POINTER = 5,
   KMS_PULL_GRAB_FAILED = -1,
 };
 
@@ -77,6 +83,7 @@ struct Drmtap {
   int (*displays_changed)(drmtap_ctx *) = nullptr;
   int (*grab_desc)(drmtap_ctx *, drmtap_dmabuf_desc *, drmtap_frame_info *) =
       nullptr;
+  int (*grab_mapped)(drmtap_ctx *, drmtap_frame_info *) = nullptr;
   void (*frame_release)(drmtap_ctx *, drmtap_frame_info *) = nullptr;
   int (*get_cursor)(drmtap_ctx *, drmtap_cursor_info *) = nullptr;
   void (*cursor_release)(drmtap_ctx *, drmtap_cursor_info *) = nullptr;
@@ -94,7 +101,9 @@ void log_drmtap_error(const Drmtap *lib, drmtap_ctx *ctx, const char *what);
 // desktop's framebuffer follows it.
 constexpr uint32_t MIN_SCANOUT_SIDE = 128;
 
-// One grabbed scanout, held from the grab until KmsCapture::release.
+// One grabbed scanout, held from the grab until KmsCapture::release. A
+// mapped grab has its pixels in `info`, and `desc` gives only its geometry
+// and format.
 struct KmsFrame {
   drmtap_dmabuf_desc desc = {};
   drmtap_frame_info info = {};
@@ -109,6 +118,10 @@ struct KmsCapture {
   // The CRTC behind the connector the capture was opened for; 0 when
   // libdrmtap chose the display.
   uint32_t crtc_id = 0;
+  // Grabs return linear pixels in memory rather than the scanout's dma-buf:
+  // the CPU path reads them. libdrmtap detiles the scanout for it, with EGL
+  // on the GPU where the layout needs it.
+  bool mapped = false;
   int width = 0;
   int height = 0;
   uint32_t fourcc = 0;
@@ -135,7 +148,8 @@ struct KmsCapture {
                       KmsFrame &first);
   void close();
   // Takes the geometry, format and modifier of `desc` as the pipeline's.
-  // False when the dma-buf size cannot be read.
+  // False when the dma-buf size cannot be read. A mapped capture has no
+  // dma-buf to measure.
   bool adopt(const drmtap_dmabuf_desc &desc);
   // Grabs are paced at `fps`, starting now.
   void start_pacing(int fps);
@@ -151,6 +165,9 @@ struct KmsCapture {
   // a new display configuration and KMS_PULL_GRAB_FAILED for a failed grab.
   int32_t grab(KmsFrame &frame);
   void release(KmsFrame &frame);
+  // One grab, of the dma-buf or of mapped pixels; a negative errno on
+  // failure.
+  int grab_frame(KmsFrame &frame);
   // The last grab carries another modifier than the pipeline was built
   // with.
   bool other_modifier() const { return modifier != opened_modifier; }

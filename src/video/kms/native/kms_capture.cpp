@@ -57,6 +57,7 @@ Drmtap load_drmtap() {
   lib.list_displays = (decltype(lib.list_displays))resolve("drmtap_list_displays");
   lib.displays_changed = (decltype(lib.displays_changed))resolve("drmtap_displays_changed");
   lib.grab_desc = (decltype(lib.grab_desc))resolve("drmtap_grab_desc");
+  lib.grab_mapped = (decltype(lib.grab_mapped))resolve("drmtap_grab_mapped");
   lib.frame_release =
       (decltype(lib.frame_release))resolve("drmtap_frame_release");
   lib.get_cursor = (decltype(lib.get_cursor))resolve("drmtap_get_cursor");
@@ -139,7 +140,7 @@ KmsOpenFailure KmsCapture::open(const char *device, uint32_t connector_id,
   // Establish the display configuration before publishing any captured frame.
   lib->displays_changed(ctx);
 
-  int ret = lib->grab_desc(ctx, &first.desc, &first.info);
+  int ret = grab_frame(first);
   if (ret < 0) {
     log_drmtap_error(lib, ctx, "drmtap grab failed");
     return ret == -ENODEV   ? KMS_NO_SCANOUT
@@ -168,6 +169,8 @@ bool KmsCapture::adopt(const drmtap_dmabuf_desc &desc) {
   fourcc = desc.format;
   modifier = desc.modifier;
   opened_modifier = desc.modifier;
+  if (mapped)
+    return true;
   // A later grab is refused unless it has this size and format; one with
   // another modifier measures its buffer again (grab).
   off_t size = lseek(desc.dma_buf_fd, 0, SEEK_END);
@@ -207,7 +210,7 @@ int32_t KmsCapture::grab(KmsFrame &frame) {
   if (lib->displays_changed(ctx) != 0)
     return KMS_PULL_SCANOUT_CHANGED;
 
-  int ret = lib->grab_desc(ctx, &frame.desc, &frame.info);
+  int ret = grab_frame(frame);
   if (ret < 0) {
     log_drmtap_error(lib, ctx, "drmtap grab failed");
     return KMS_PULL_GRAB_FAILED;
@@ -241,6 +244,23 @@ int32_t KmsCapture::grab(KmsFrame &frame) {
 
 void KmsCapture::release(KmsFrame &frame) {
   lib->frame_release(ctx, &frame.info);
+}
+
+int KmsCapture::grab_frame(KmsFrame &frame) {
+  if (!mapped)
+    return lib->grab_desc(ctx, &frame.desc, &frame.info);
+  int ret = lib->grab_mapped(ctx, &frame.info);
+  if (ret < 0)
+    return ret;
+  // The pixels are linear whatever the scanout's layout, so the modifier
+  // stays that of the open and no grab measures a dma-buf.
+  frame.desc = {};
+  frame.desc.dma_buf_fd = -1;
+  frame.desc.width = frame.info.width;
+  frame.desc.height = frame.info.height;
+  frame.desc.format = frame.info.format;
+  frame.desc.pitches[0] = frame.info.stride;
+  return 0;
 }
 
 KmsCursor::~KmsCursor() {

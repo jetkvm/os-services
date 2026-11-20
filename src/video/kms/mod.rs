@@ -1,10 +1,13 @@
 //! The Linux pipeline. Scanout frames go from the display engine into the
 //! GPU's encoder (VAAPI, or NVENC through CUDA on NVIDIA's driver) without
 //! touching a CPU core, and the worker pulls them itself: the streaming
-//! thread submits nothing.
+//! thread submits nothing. When no GPU pipeline builds, a CPU path encodes
+//! the frames that changed.
 
 mod capture;
 pub mod capture_test;
+#[cfg(test)]
+mod cpu_frame;
 
 pub use capture::{h265_enabled, probe, Backend, CaptureTarget, KmsFailure, Probed};
 
@@ -221,7 +224,7 @@ impl KmsPipeline {
         (pull, written)
     }
 
-    fn record_frame(&mut self, written: &Written, encode: Duration) {
+    fn record_frame(&mut self, written: &Written, encode: Duration, fresh: bool) {
         self.reopen_attempts = 0;
         self.expect_frame();
         if written.keyframe {
@@ -235,7 +238,7 @@ impl KmsPipeline {
             write: written.elapsed,
             bytes: written.bytes,
             keyframe: written.keyframe,
-            fresh: true,
+            fresh,
         });
     }
 
@@ -382,8 +385,11 @@ impl Pipeline for KmsPipeline {
         if written.failed {
             return;
         }
-        let progress = pull == Pull::Encoded && written.bytes > 0;
-        let stalled = !progress && self.stalled();
+        let encoded = matches!(pull, Pull::Encoded | Pull::PointerOnly);
+        let progress = encoded && written.bytes > 0;
+        // An unchanged screen on the CPU path encodes nothing, and its grab
+        // still shows that the capture is alive.
+        let stalled = !progress && pull != Pull::Unchanged && self.stalled();
         match pull {
             Pull::ScanoutChanged => {
                 if !stalled {
@@ -397,10 +403,16 @@ impl Pipeline for KmsPipeline {
             }
             Pull::GrabFailed => self.reopen(false, stalled, wire),
             _ if stalled => self.reopen(false, true, wire),
-            Pull::Encoded if progress => {
-                self.record_frame(&written, started.elapsed() - written.elapsed)
+            Pull::Encoded | Pull::PointerOnly if progress => self.record_frame(
+                &written,
+                started.elapsed() - written.elapsed,
+                pull == Pull::Encoded,
+            ),
+            Pull::Encoded | Pull::PointerOnly => {}
+            Pull::Unchanged => {
+                self.expect_frame();
+                self.stages.add_idle(1)
             }
-            Pull::Encoded => {}
             Pull::Idle => self.stages.add_idle(1),
             Pull::Failed(code) => {
                 self.live = None;

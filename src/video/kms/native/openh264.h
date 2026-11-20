@@ -1,5 +1,6 @@
 // H.264 in software with Cisco's OpenH264, for the VAAPI pipeline when the
-// driver has no H.264 encoder, as Fedora's Mesa has none. The library is the
+// driver has no H.264 encoder, as Fedora's Mesa has none, and for the CPU
+// path when no GPU pipeline builds (kms_software.cpp). The library is the
 // one the computer has installed, for example Fedora's openh264 package from
 // Cisco's repository: the service loads it at run time and never ships it.
 //
@@ -123,16 +124,25 @@ public:
   // Returns 0, or the encoder's error.
   int encode(const AVFrame *nv12, bool force_idr, uint64_t pts_us, const Deliver &deliver) {
     split_chroma(nv12);
+    return encode(nv12->data[0], nv12->linesize[0], u_.data(), v_.data(), width_ / 2, force_idr,
+                  pts_us, deliver);
+  }
+
+  // Encodes one I420 frame in memory: the luma plane and the two chroma
+  // planes, which share `chroma_stride`.
+  int encode(const uint8_t *y, int y_stride, const uint8_t *u, const uint8_t *v,
+             int chroma_stride, bool force_idr, uint64_t pts_us, const Deliver &deliver) {
     Room<SSourcePicture> picture;
     SSourcePicture &pic = picture.value;
     pic.iColorFormat = videoFormatI420;
     pic.iPicWidth = width_;
     pic.iPicHeight = height_;
-    pic.iStride[0] = nv12->linesize[0];
-    pic.iStride[1] = pic.iStride[2] = width_ / 2;
-    pic.pData[0] = nv12->data[0];
-    pic.pData[1] = u_.data();
-    pic.pData[2] = v_.data();
+    pic.iStride[0] = y_stride;
+    pic.iStride[1] = pic.iStride[2] = chroma_stride;
+    // OpenH264 only reads the picture.
+    pic.pData[0] = const_cast<uint8_t *>(y);
+    pic.pData[1] = const_cast<uint8_t *>(u);
+    pic.pData[2] = const_cast<uint8_t *>(v);
     pic.uiTimeStamp = (long long)(pts_us / 1000);
     if (force_idr)
       encoder_->ForceIntraFrame(true);

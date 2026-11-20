@@ -67,7 +67,11 @@ The service starts at sign-in through the systemd user unit and the autostart en
 
 ### Video encoders on Linux
 
-On Linux, the GPU encodes the video with VAAPI (Intel and AMD) or NVENC (NVIDIA, Wayland only). If the computer has no H.264 encoder, for example on Fedora, the service shows a dialog that tells you what to install. Until then, the KVM shows its HDMI capture.
+On Linux, the GPU encodes the video with VAAPI (Intel and AMD) or NVENC (NVIDIA, Wayland only). If the VAAPI driver has no H.264 encoder, OpenH264 encodes the video on the CPU.
+
+If the GPU cannot process the video, the service uses the CPU for all the video work. For example, the VAAPI driver does not load, or it has no video processing. Then OpenH264 must be installed. This path uses more CPU time and gives a lower frame rate. The log shows `encoder=openh264_cpu`.
+
+If the computer has no H.264 encoder, for example on Fedora, the service shows a dialog that tells you what to install. Until then, the KVM shows its HDMI capture.
 
 ### NVIDIA
 

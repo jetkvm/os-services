@@ -171,11 +171,11 @@ When the service sends no video, the KVM shows its HDMI capture. The clipboard, 
 </details>
 
 <details>
-<summary><code>video not available: the display's scanout format cannot be imported by the GPU's encoder</code> or <code>the GPU's hardware encoder would not open</code></summary>
+<summary><code>video not available: the display's scanout format cannot be imported by the GPU's encoder</code>, <code>the GPU's hardware encoder would not open</code> or <code>the capture pipeline failed to build; the log has why</code></summary>
 
-**Cause:** The GPU or its driver cannot encode the display.
+**Cause:** The GPU or its driver cannot encode the display. The service then tries to encode on the CPU, and that also failed. The CPU path needs OpenH264. The lines before this line in the log tell why each path failed.
 
-**Fix:** Use Intel or AMD graphics with a current Mesa VAAPI driver, or NVIDIA graphics with the proprietary driver.
+**Fix:** Install OpenH264: on Fedora, the `openh264` package, and on other distributions, `libopenh264`. For encoding on the GPU, use Intel or AMD graphics with a current Mesa VAAPI driver, or NVIDIA graphics with the proprietary driver.
 
 </details>
 
