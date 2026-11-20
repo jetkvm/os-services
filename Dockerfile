@@ -10,8 +10,10 @@ ENV PATH=/root/.cargo/bin:/usr/local/go/bin:${PATH}
 
 # vcpkg builds FFmpeg; the KMS capture links the computer's libva, libdrm
 # and EGL, so only their headers come from Ubuntu. meson, ninja, libcap and
-# libseccomp build libdrmtap. The update check links OpenSSL, which cargo
-# builds from source with perl and make; libclang reads its headers.
+# libseccomp build libdrmtap; the EGL and GLES headers build its EGL
+# detiling, which loads the computer's EGL at run time. The update check
+# links OpenSSL, which cargo builds from source with perl and make; libclang
+# reads its headers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \

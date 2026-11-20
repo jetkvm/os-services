@@ -52,9 +52,12 @@ if ! cmp -s "$WORK/src/include/drmtap.h" "$VENDORED"; then
   exit 1
 fi
 
-# libdrmtap's EGL is only for detiling into CPU pixels, which the sender
-# never asks for: it imports the scanout dma-buf itself.
-meson setup "$WORK/build" "$WORK/src" -Degl=disabled --buildtype=release >/dev/null
+# libdrmtap's EGL detiles the scanout into CPU pixels for the sender's CPU
+# path, which runs when no GPU pipeline builds. Without it, only linear and
+# plain Intel X/Y-tiled scanouts come to memory, and NVIDIA and compressed
+# Intel and AMD layouts fail. The library loads EGL and GLES at run time, so
+# they are not link dependencies; meson needs only their headers.
+meson setup "$WORK/build" "$WORK/src" -Degl=enabled --buildtype=release >/dev/null
 meson compile -C "$WORK/build" >/dev/null
 
 if [ -n "$STAGE" ]; then
