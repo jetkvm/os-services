@@ -13,8 +13,6 @@ use std::{
 pub struct Source {
     /// None between one display and the next.
     capture: Option<ScreenCapture>,
-    width: usize,
-    height: usize,
     layout: Nv12Layout,
     clock: FrameClock,
     /// The newest frame. ScreenCaptureKit delivers nothing while the screen
@@ -31,8 +29,6 @@ impl Source {
     pub fn open(display: Display, configured: &Configured) -> Result<Self, Box<dyn Error>> {
         let mut source = Self {
             capture: None,
-            width: 0,
-            height: 0,
             layout: configured.layout,
             clock: FrameClock::new(),
             last: None,
@@ -47,19 +43,17 @@ impl Source {
     /// or the same one for a new encoder.
     pub fn reopen(&mut self, display: Display) -> Result<(), Box<dyn Error>> {
         self.close();
-        self.width = display.width();
-        self.height = display.height();
         self.capture = Some(ScreenCapture::start(
             display.id(),
-            self.width,
-            self.height,
+            self.layout.width,
+            self.layout.height,
             FPS,
         )?);
         self.restart();
         Ok(())
     }
 
-    /// Ends the stream; its frames have the old display's size.
+    /// Ends the stream and releases the last captured frame.
     pub fn close(&mut self) {
         self.capture = None;
         self.last = None;
@@ -131,8 +125,8 @@ impl Source {
         self.owed = false;
         worker.submit(FrameJob {
             nv12,
-            width: self.width,
-            height: self.height,
+            width: self.layout.width,
+            height: self.layout.height,
             capture_us,
             capture_wait,
             convert: started.elapsed(),

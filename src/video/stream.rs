@@ -49,7 +49,8 @@ pub fn stream_video(
     let Some(display) = place_display(selector, config, &mut mode_due, true, worker, link)? else {
         return Ok(());
     };
-    let (width, height) = (display.width(), display.height());
+    let display_size = (display.width(), display.height());
+    let (width, height) = capture_size(display_size);
     log_startup(startup, "display_ready");
     let configured = worker.configure(request(selector, width, height, config), link)?;
     log_startup(startup, "encoder_ready");
@@ -64,6 +65,7 @@ pub fn stream_video(
         link,
         selector,
         config,
+        display_size,
         width,
         height,
         source,
@@ -90,11 +92,55 @@ fn request(
     }
 }
 
+fn capture_size(size: (usize, usize)) -> (usize, usize) {
+    #[cfg(target_os = "macos")]
+    {
+        use crate::protocol::{CAPTURE_MAX_HEIGHT, CAPTURE_MAX_WIDTH};
+
+        let (width, height) = size;
+        let max_width = CAPTURE_MAX_WIDTH as usize;
+        let max_height = CAPTURE_MAX_HEIGHT as usize;
+        if width > max_width || height > max_height {
+            let (width, height) = if max_width * height <= max_height * width {
+                (max_width, height * max_width / width)
+            } else {
+                (width * max_height / height, max_height)
+            };
+            // NV12 chroma samples cover two pixels on each axis.
+            return ((width & !1).max(2), (height & !1).max(2));
+        }
+    }
+    size
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::capture_size;
+
+    #[test]
+    fn retina_capture_fits_the_advertised_height() {
+        assert_eq!(capture_size((3456, 2234)), (3340, 2160));
+    }
+
+    #[test]
+    fn ultrawide_capture_fits_the_advertised_width() {
+        assert_eq!(capture_size((5120, 1440)), (3840, 1080));
+    }
+
+    #[test]
+    fn capture_inside_the_advertised_limits_keeps_its_size() {
+        assert_eq!(capture_size((1920, 1080)), (1920, 1080));
+        assert_eq!(capture_size((3840, 2160)), (3840, 2160));
+    }
+}
+
 struct VideoStream<'a, 'c> {
     worker: &'a Worker,
     link: &'a mut ControlLink<'c>,
     selector: &'a mut DisplaySelector,
     config: VideoConfig,
+    /// The display mode, which may be larger than the encoded picture.
+    display_size: (usize, usize),
     width: usize,
     height: usize,
     source: Source,
@@ -158,8 +204,7 @@ impl VideoStream<'_, '_> {
         // A mode set here changes the display's size, which the check below
         // sees.
         set_due_mode(&mut self.mode_due, self.config);
-        let changed =
-            self.reconfigure || self.selector.selected_mode()? != Some((self.width, self.height));
+        let changed = self.reconfigure || self.selector.selected_mode()? != Some(self.display_size);
         self.reconfigure = false;
         if !changed {
             return Ok(true);
@@ -175,7 +220,8 @@ impl VideoStream<'_, '_> {
         else {
             return Ok(false);
         };
-        (self.width, self.height) = (display.width(), display.height());
+        self.display_size = (display.width(), display.height());
+        (self.width, self.height) = capture_size(self.display_size);
         self.source.close();
         let bitrate = self.configure_encoder()?;
         self.source.reopen(display)?;
@@ -252,8 +298,10 @@ impl VideoStream<'_, '_> {
         let Some(display) = wait_for_display(self.selector, self.worker, self.link)? else {
             return Ok(false);
         };
-        if (display.width(), display.height()) != (self.width, self.height) {
-            (self.width, self.height) = (display.width(), display.height());
+        self.display_size = (display.width(), display.height());
+        let size = capture_size(self.display_size);
+        if size != (self.width, self.height) {
+            (self.width, self.height) = size;
             self.configure_encoder()?;
         }
         self.source.renew(display)?;

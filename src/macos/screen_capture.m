@@ -1,5 +1,5 @@
 // Display capture through ScreenCaptureKit, for screen_capture.rs. The stream
-// delivers NV12 (video range, BT.601) at the display's pixel size with the
+// delivers NV12 (video range, BT.601) at the configured size with the
 // pointer drawn in, so the encoder reads the frames without a conversion.
 // Compiled with ARC.
 

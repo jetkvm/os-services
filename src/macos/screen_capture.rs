@@ -1,5 +1,5 @@
 //! A ScreenCaptureKit stream of one display (`screen_capture.m`): NV12 frames
-//! at the display's pixel size with the pointer drawn in.
+//! at the configured size with the pointer drawn in.
 
 use crate::video::nv12::Nv12Layout;
 use std::{
