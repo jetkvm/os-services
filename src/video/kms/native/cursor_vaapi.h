@@ -12,6 +12,7 @@ extern "C" {
 
 // Blend the hardware cursor before converting the desktop to encoder NV12.
 // Desktop pixels stay on the GPU, including on drivers without VA blending.
+// A compressed scanout takes the same EGL step also without a cursor.
 class CursorVpp {
  public:
   AVBufferRef *frames = nullptr;
@@ -58,13 +59,15 @@ class CursorVpp {
 
     VASurfaceID desktop_surface = surface(input);
     av_frame_unref(rgb);
-    if (cursor.visible && cursor.pixels && cursor.width && cursor.height) {
-      if (cursor.width > 1024 || cursor.height > 1024)
-        return AVERROR(EINVAL);
+    auto scanout = reinterpret_cast<AVDRMFrameDescriptor *>(prime->data[0]);
+    const bool shown = cursor.visible && cursor.pixels && cursor.width && cursor.height;
+    if (shown && (cursor.width > 1024 || cursor.height > 1024))
+      return AVERROR(EINVAL);
+    if (shown || has_auxiliary_planes(scanout)) {
       if ((ret = av_hwframe_get_buffer(rgb_frames, rgb, 0)) < 0)
         return ret;
-      if (!gl.compose(display, reinterpret_cast<AVDRMFrameDescriptor *>(prime->data[0]), surface(rgb), input->width, input->height, cursor)) {
-        LOG_ERROR("cursor EGL composition failed");
+      if (!gl.compose(display, scanout, surface(rgb), input->width, input->height, cursor)) {
+        LOG_ERROR("scanout EGL composition failed");
         return AVERROR(EIO);
       }
       desktop_surface = surface(rgb);
@@ -101,6 +104,17 @@ class CursorVpp {
   AVBufferRef *rgb_frames = nullptr;
   AVFrame *rgb = nullptr;
   CursorGL gl;
+
+  // The scanout has more planes than its pixel format: the others hold the
+  // compression state of the pixels, as with Intel's CCS modifiers. `input`
+  // is then not the picture. When the VAAPI driver refuses the modifier,
+  // FFmpeg imports the buffer again without it, and the driver reads the
+  // compressed pixels as plain ones. EGL imports all planes with the
+  // modifier, so the picture comes through the EGL composition.
+  static bool has_auxiliary_planes(const AVDRMFrameDescriptor *scanout) {
+    const int pixel_planes = scanout->layers[0].format == DRM_FORMAT_NV12 ? 2 : 1;
+    return scanout->layers[0].nb_planes > pixel_planes;
+  }
 
   static VASurfaceID surface(const AVFrame *frame) {
     return VASurfaceID(uintptr_t(frame->data[3]));
