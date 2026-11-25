@@ -268,7 +268,7 @@ The video service streams the target's display as H.264 or H.265. The KVM sends 
 - Each message is the complete desired state. The sender applies the messages in the order in which they arrive.
 - `width` and `height` are valid in every message, also when `enabled` is 0.
 - `layout` 1 puts the KVM display next to the target's other displays. `layout` 0 makes it a mirror of them.
-- The sender captures the display at its current mode.
+- The sender captures the display at its current mode. It may scale the picture to fit the dimensions advertised in `video.capabilities`.
 - The KVM requests H.265 only if the sender set bit 1 of `codec_flags`, and limits `maximum_fps` to `max_fps`. Settings that need a size above `max_width` or `max_height` fault the video service.
 
 | Change | Sender action |

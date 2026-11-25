@@ -106,8 +106,8 @@ const UPDATE_MAX_VERSION: usize = 64;
 
 const MAX_DIMENSION: u32 = 16384;
 const MAX_FPS: u32 = 240;
-const CAPTURE_MAX_WIDTH: u32 = 3840;
-const CAPTURE_MAX_HEIGHT: u32 = 2160;
+pub(crate) const CAPTURE_MAX_WIDTH: u32 = 3840;
+pub(crate) const CAPTURE_MAX_HEIGHT: u32 = 2160;
 const CAPTURE_MAX_FPS: u32 = 120;
 
 /// How long the KVM has to reset, answer the hello and send session.config.
