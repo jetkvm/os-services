@@ -240,6 +240,10 @@ pub enum GuestOs {
 pub struct ClipboardCapabilities {
     pub read: bool,
     pub write: bool,
+    /// A write also sets the primary selection, which a Linux terminal
+    /// pastes with Shift+Insert. Only for a KVM whose session.config has
+    /// `clipboard_primary`: another KVM takes the flag for an error.
+    pub primary: bool,
     pub os: GuestOs,
 }
 
@@ -454,6 +458,10 @@ pub struct SessionSettings {
     /// the display's mode and says so in video.capabilities.
     #[serde(default)]
     pub display_mode_by_sender: bool,
+    /// The KVM accepts the primary-selection flag in clipboard.capabilities
+    /// and then pastes with Shift+Insert on Linux.
+    #[serde(default)]
+    pub clipboard_primary: bool,
 }
 
 /// A record the KVM sends to the sender.
